@@ -63,7 +63,8 @@ func TestWorkspaceEndToEnd(t *testing.T) {
 		if !bytes.Equal(stdout, payload) || len(stderr) != 0 {
 			t.Fatalf("SSH changed binary stream: got=%d want=%d stderr=%q", len(stdout), len(payload), stderr)
 		}
-		harness.assertPortForward(t, record, source)
+		harness.assertPortForward(t, record, source, "127.0.0.1")
+		harness.assertPortForward(t, record, source, "0.0.0.0")
 		harness.copyWithSCP(t, record, payload, "/workspace/scp.bin")
 		harness.copyWithSFTP(t, record, payload, "/workspace/sftp.bin")
 		for _, path := range []string{"/workspace/scp.bin", "/workspace/sftp.bin"} {
@@ -513,7 +514,7 @@ func (h *harness) sshOptions(t *testing.T, record state.Workspace) []string {
 	}
 }
 
-func (h *harness) assertPortForward(t *testing.T, record state.Workspace, source string) {
+func (h *harness) assertPortForward(t *testing.T, record state.Workspace, source, bindHost string) {
 	t.Helper()
 	const containerPort = 39001
 	echoSource := filepath.Join(source, "loopback-echo.go")
@@ -578,7 +579,7 @@ func main() {
 		t.Fatal(err)
 	}
 	forwardCtx, cancelForward := context.WithCancel(h.ctx)
-	forward := fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", localPort, containerPort)
+	forward := fmt.Sprintf("%s:%d:127.0.0.1:%d", bindHost, localPort, containerPort)
 	forwardArguments := append(h.sshOptions(t, record),
 		"-T", "-N", "-o", "ExitOnForwardFailure=yes",
 		"-L", forward, "agent@cohotfs-"+record.ID,
@@ -624,7 +625,7 @@ func main() {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("localhost forward did not echo payload: %v\nserver: %s\nforward: %s", lastErr, serverOutput.String(), forwardOutput.String())
+	t.Fatalf("%s forward did not echo payload: %v\nserver: %s\nforward: %s", bindHost, lastErr, serverOutput.String(), forwardOutput.String())
 }
 
 func stopIntegrationCommand(cancel context.CancelFunc, command *exec.Cmd, done <-chan error) {

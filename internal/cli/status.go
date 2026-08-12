@@ -144,13 +144,14 @@ func buildWorkspaceCommand(deps Dependencies) *cobra.Command {
 		},
 	}
 	list.Flags().String("output", "text", "output format: text or json")
+	workspaceName := ""
 	status := &cobra.Command{
-		Use:  "status <workspace>",
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		Use:  "status",
+		Args: noWorkspacePositionalArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			format, _ := cmd.Flags().GetString("output")
 			return withStateStore(deps, func(store *state.Store) error {
-				workspace, err := resolveWorkspace(store, args[0])
+				workspace, err := resolveWorkspaceSelection(store, workspaceName)
 				if err != nil {
 					return err
 				}
@@ -167,6 +168,7 @@ func buildWorkspaceCommand(deps Dependencies) *cobra.Command {
 		},
 	}
 	status.Flags().String("output", "text", "output format: text or json")
+	status.Flags().StringVar(&workspaceName, "workspace", "", "workspace name or ID (defaults to current directory)")
 	command.AddCommand(list, status)
 	return command
 }
@@ -185,6 +187,51 @@ func resolveWorkspace(store *state.Store, nameOrID string) (state.Workspace, err
 		}
 	}
 	return state.Workspace{}, apperr.New(apperr.ExitStateConflict, "not_found", "workspace %q not found", nameOrID)
+}
+
+func resolveWorkspaceSelection(store *state.Store, nameOrID string) (state.Workspace, error) {
+	if nameOrID != "" {
+		return resolveWorkspace(store, nameOrID)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return state.Workspace{}, err
+	}
+	canonical, _, _, err := config.ProjectIdentity(cwd)
+	if err != nil {
+		return state.Workspace{}, err
+	}
+	workspaces, err := store.ListWorkspaces()
+	if err != nil {
+		return state.Workspace{}, err
+	}
+	var matches []state.Workspace
+	for _, workspace := range workspaces {
+		if workspace.CanonicalSource == canonical {
+			matches = append(matches, workspace)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return state.Workspace{}, apperr.New(apperr.ExitStateConflict, "not_found", "no workspace matches current directory %s; use --workspace <name-or-id>", canonical)
+	case 1:
+		return matches[0], nil
+	default:
+		return state.Workspace{}, apperr.New(apperr.ExitStateConflict, "state_conflict", "multiple workspaces match current directory %s; use --workspace <id>", canonical)
+	}
+}
+
+func addWorkspaceFlag(command *cobra.Command) *string {
+	value := new(string)
+	command.Flags().StringVar(value, "workspace", "", "workspace name or ID (defaults to current directory)")
+	return value
+}
+
+func noWorkspacePositionalArgs(command *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	return apperr.New(apperr.ExitUsage, "usage", "%s accepts no positional workspace; use --workspace <name-or-id>", command.CommandPath())
 }
 
 func withStateStore(deps Dependencies, fn func(*state.Store) error) error {

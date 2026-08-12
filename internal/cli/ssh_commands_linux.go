@@ -34,25 +34,28 @@ import (
 )
 
 func buildShellCommand(deps Dependencies) *cobra.Command {
-	return &cobra.Command{Use: "shell <workspace>", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		return withSSHWorkspace(deps, cmd, args[0], func(record state.Workspace, root *hostroot.Root) error {
+	command := &cobra.Command{Use: "shell", Args: noWorkspacePositionalArgs}
+	workspaceName := addWorkspaceFlag(command)
+	command.RunE = func(cmd *cobra.Command, _ []string) error {
+		return withSSHWorkspace(deps, cmd, *workspaceName, func(record state.Workspace, root *hostroot.Root) error {
 			return runOpenSSH(cmd.Context(), cmd, root, record, true, nil)
 		})
-	}}
+	}
+	return command
 }
 
 func buildExecCommand(deps Dependencies) *cobra.Command {
-	command := &cobra.Command{Use: "exec <workspace> -- <command...>", Args: cobra.MinimumNArgs(2), DisableFlagParsing: true}
+	command := &cobra.Command{Use: "exec -- <command...>", Args: cobra.MinimumNArgs(1)}
+	workspaceName := addWorkspaceFlag(command)
 	command.RunE = func(cmd *cobra.Command, args []string) error {
-		workspaceName := args[0]
-		argv := args[1:]
+		argv := args
 		if len(argv) != 0 && argv[0] == "--" {
 			argv = argv[1:]
 		}
 		if len(argv) == 0 {
 			return apperr.New(apperr.ExitUsage, "usage", "exec requires a command")
 		}
-		return withSSHWorkspace(deps, cmd, workspaceName, func(record state.Workspace, root *hostroot.Root) error {
+		return withSSHWorkspace(deps, cmd, *workspaceName, func(record state.Workspace, root *hostroot.Root) error {
 			return runOpenSSH(cmd.Context(), cmd, root, record, false, argv)
 		})
 	}
@@ -93,17 +96,18 @@ func buildAgentCommand(deps Dependencies) *cobra.Command {
 		},
 	}
 	discover.Flags().String("output", "text", "output format: text or json")
-	run := &cobra.Command{Use: "run <workspace> <omp|codex|claude> -- <args...>", Args: cobra.MinimumNArgs(2), DisableFlagParsing: true}
+	run := &cobra.Command{Use: "run <omp|codex|claude> -- <args...>", Args: cobra.MinimumNArgs(1)}
+	workspaceName := addWorkspaceFlag(run)
 	run.RunE = func(cmd *cobra.Command, args []string) error {
-		workspaceName, agent := args[0], args[1]
+		agent := args[0]
 		if agent != "omp" && agent != "codex" && agent != "claude" {
 			return apperr.New(apperr.ExitUsage, "agent", "unknown agent %q", agent)
 		}
-		agentArgs := args[2:]
+		agentArgs := args[1:]
 		if len(agentArgs) != 0 && agentArgs[0] == "--" {
 			agentArgs = agentArgs[1:]
 		}
-		return withSSHWorkspace(deps, cmd, workspaceName, func(record state.Workspace, root *hostroot.Root) error {
+		return withSSHWorkspace(deps, cmd, *workspaceName, func(record state.Workspace, root *hostroot.Root) error {
 			if !record.IntegrationGrants["agent:"+agent] {
 				return apperr.New(apperr.ExitPolicy, "agent", "%s integration is not granted", agent)
 			}
@@ -167,7 +171,7 @@ func withSSHWorkspace(deps Dependencies, cmd *cobra.Command, name string, fn fun
 		if err != nil {
 			return err
 		}
-		record, err := resolveWorkspace(store, name)
+		record, err := resolveWorkspaceSelection(store, name)
 		if err != nil {
 			return err
 		}

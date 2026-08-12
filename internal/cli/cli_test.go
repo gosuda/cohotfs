@@ -137,6 +137,89 @@ func TestWorkspaceListJSONStableFields(t *testing.T) {
 	}
 }
 
+func TestWorkspaceStatusDefaultsToCurrentDirectoryAndSupportsExplicitFlag(t *testing.T) {
+	rootPath := filepath.Join(t.TempDir(), "root")
+	root, err := hostroot.OpenForTest(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.NewStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentSource, _, _, err := config.ProjectIdentity(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherSource, _, _, err := config.ProjectIdentity(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentID, _ := state.NewWorkspaceID()
+	otherID, _ := state.NewWorkspaceID()
+	now := time.Unix(10, 0).UTC()
+	for _, record := range []state.Workspace{
+		{ID: currentID, Name: "current", CanonicalSource: currentSource, Backend: "docker", Status: state.StatusStopped, CreatedAt: now, UpdatedAt: now},
+		{ID: otherID, Name: "other", CanonicalSource: otherSource, Backend: "docker", Status: state.StatusStopped, CreatedAt: now, UpdatedAt: now},
+	} {
+		if err := store.SaveWorkspace(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := root.Close(); err != nil {
+		t.Fatal(err)
+	}
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(currentSource); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(previous)
+
+	assertStatus := func(args []string, wantID string) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		code := Execute(context.Background(), args, &stdout, &stderr, testDependencies(rootPath))
+		if code != apperr.ExitSuccess {
+			t.Fatalf("%v code=%d stderr=%q", args, code, stderr.String())
+		}
+		var summary workspaceSummary
+		if err := json.Unmarshal(stdout.Bytes(), &summary); err != nil {
+			t.Fatalf("decode %q: %v", stdout.String(), err)
+		}
+		if summary.ID != wantID {
+			t.Fatalf("%v selected %s, want %s", args, summary.ID, wantID)
+		}
+	}
+	assertStatus([]string{"workspace", "status", "--output", "json"}, currentID)
+	assertStatus([]string{"workspace", "status", "--workspace", "other", "--output", "json"}, otherID)
+
+	var stdout, stderr bytes.Buffer
+	if code := Execute(context.Background(), []string{"workspace", "status", "other"}, &stdout, &stderr, testDependencies(rootPath)); code != apperr.ExitUsage {
+		t.Fatalf("legacy positional workspace code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestWorkspaceTargetingCommandsExposeWorkspaceFlag(t *testing.T) {
+	root := NewRootCommand(testDependencies(filepath.Join(t.TempDir(), "root")))
+	for _, path := range [][]string{
+		{"shell"}, {"exec"}, {"port-forward"},
+		{"workspace", "status"}, {"workspace", "start"}, {"workspace", "stop"}, {"workspace", "restart"},
+		{"workspace", "remove"}, {"workspace", "recover"}, {"workspace", "rotate-host-key"},
+		{"setup", "run"}, {"agent", "run"},
+	} {
+		command, _, err := root.Find(path)
+		if err != nil {
+			t.Fatalf("find %v: %v", path, err)
+		}
+		if command.Flags().Lookup("workspace") == nil {
+			t.Fatalf("%v has no --workspace flag", path)
+		}
+	}
+}
+
 func TestBareCommandHomeRequiresExplicitGrant(t *testing.T) {
 	home := t.TempDir()
 	if _, _, err := validateBareDirectory(home, home, false); apperr.Code(err) != apperr.ExitPolicy {
@@ -374,7 +457,7 @@ func TestInteractiveOnboardCreatesConfigAndSSHIdentity(t *testing.T) {
 func TestWorkspaceRemoveRequiresConfirmationBeforeRuntimeAccess(t *testing.T) {
 	rootPath := filepath.Join(t.TempDir(), "root")
 	var stdout, stderr bytes.Buffer
-	code := Execute(context.Background(), []string{"workspace", "remove", "example"}, &stdout, &stderr, testDependencies(rootPath))
+	code := Execute(context.Background(), []string{"workspace", "remove", "--workspace", "example"}, &stdout, &stderr, testDependencies(rootPath))
 	if code != apperr.ExitStateConflict {
 		t.Fatalf("remove code = %d, stderr = %s", code, stderr.String())
 	}

@@ -208,9 +208,10 @@ Primary transport for a local Linux runtime:
 
 Docker v0.1 requires the shared-directory UDS transport. Docker’s host-port publication targets the container’s bridge address and therefore cannot reach `sshd` bound to container loopback; `loopback_publish` is not advertised. If a runtime/VM cannot share the verified pathname socket, planning returns typed `ErrUnsupported` before side effects. Do not add a reverse bridge, runtime-exec transport, unauthenticated routable listener, or wider `sshd` bind as fallback.
 
-`cohotfs port-forward <workspace> <port>` uses authenticated OpenSSH local
-forwarding over that transport. Both ends are fixed to IPv4 loopback: the host
-listener is `127.0.0.1:<local-port>` and the permitted container target is
+`cohotfs port-forward <port> [--workspace <name-or-id>]` uses authenticated
+OpenSSH local forwarding over that transport. The host listener defaults to
+`127.0.0.1:<local-port>`; the explicit `--host 0.0.0.0` option exposes it on
+every IPv4 interface. The permitted container target remains fixed to
 `127.0.0.1:<port>`. Datagram and a second application-specific shared Unix
 socket are not part of the public contract; keeping forwarding at the SSH layer
 lets a future runtime replace the underlying SSH byte transport without
@@ -260,15 +261,24 @@ cohotfs onboard [--non-interactive]
 cohotfs doctor [--output text|json]
 cohotfs config show|validate
 cohotfs runtime list|capabilities
-cohotfs workspace create|start|stop|restart|list|status|remove|recover|rotate-host-key
+cohotfs workspace create|list
+cohotfs workspace start|stop|restart|status|remove|recover|rotate-host-key [--workspace <name-or-id>]
 cohotfs image pull|build
-cohotfs setup validate|run
-cohotfs shell [workspace]
-cohotfs exec [workspace] -- <command...>
+cohotfs setup validate
+cohotfs setup run [--workspace <name-or-id>]
+cohotfs shell [--workspace <name-or-id>]
+cohotfs exec [--workspace <name-or-id>] -- <command...>
+cohotfs port-forward <port> [--local-port <port>] [--host 127.0.0.1|0.0.0.0] [--workspace <name-or-id>]
 cohotfs ssh-proxy --workspace <id>
-cohotfs agent discover|run [workspace] <omp|codex|claude> -- <args...>
+cohotfs agent discover
+cohotfs agent run <omp|codex|claude> [--workspace <name-or-id>] -- <args...>
 cohotfs host status|stop
 ```
+
+Workspace-targeting commands resolve an omitted `--workspace` by exact canonical
+source equality with the current directory. No match or more than one match is
+a typed state conflict; explicit `--workspace <name-or-id>` is required to
+disambiguate. Positional workspace arguments are not supported.
 
 Every discovery/status/list command supports `--output json` with stable field names. Mutating commands are human-readable only in the first release and support `--yes` solely for a prompt already represented in configuration; no flag bypasses host config grants.
 

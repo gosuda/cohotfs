@@ -50,28 +50,30 @@ func buildWorkspaceLifecycleCommands(deps Dependencies) []*cobra.Command {
 			})
 		},
 	}
-	start := workspaceStateCommand(deps, "start <workspace>", "workspace.start", func(ctx context.Context, service *workspaceservice.DockerService, id, key string) (state.Workspace, error) {
+	start := workspaceStateCommand(deps, "start", "workspace.start", func(ctx context.Context, service *workspaceservice.DockerService, id, key string) (state.Workspace, error) {
 		return service.Start(ctx, id, key)
 	})
-	stop := workspaceStateCommand(deps, "stop <workspace>", "workspace.stop", func(ctx context.Context, service *workspaceservice.DockerService, id, key string) (state.Workspace, error) {
+	stop := workspaceStateCommand(deps, "stop", "workspace.stop", func(ctx context.Context, service *workspaceservice.DockerService, id, key string) (state.Workspace, error) {
 		return service.Stop(ctx, id, key, 10*time.Second)
 	})
-	restart := workspaceStateCommand(deps, "restart <workspace>", "workspace.restart", func(ctx context.Context, service *workspaceservice.DockerService, id, key string) (state.Workspace, error) {
+	restart := workspaceStateCommand(deps, "restart", "workspace.restart", func(ctx context.Context, service *workspaceservice.DockerService, id, key string) (state.Workspace, error) {
 		return service.Restart(ctx, id, key, 10*time.Second)
 	})
-	rotateHostKey := workspaceStateCommand(deps, "rotate-host-key <workspace>", "workspace.rotate-host-key", func(ctx context.Context, service *workspaceservice.DockerService, id, key string) (state.Workspace, error) {
+	rotateHostKey := workspaceStateCommand(deps, "rotate-host-key", "workspace.rotate-host-key", func(ctx context.Context, service *workspaceservice.DockerService, id, key string) (state.Workspace, error) {
 		return service.RotateSSHHostKey(ctx, id, key)
 	})
+
+	removeWorkspace := ""
 	remove := &cobra.Command{
-		Use:  "remove <workspace>",
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		Use:  "remove",
+		Args: noWorkspacePositionalArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			confirmed, _ := cmd.Flags().GetBool("yes")
 			if !confirmed {
 				return apperr.New(apperr.ExitStateConflict, "confirmation_required", "workspace removal requires --yes")
 			}
 			return withWorkspaceRuntime(cmd.Context(), deps, func(root *hostroot.Root, store *state.Store, _ *docker.Adapter, service *workspaceservice.DockerService, _ config.HostConfig) error {
-				record, err := resolveWorkspace(store, args[0])
+				record, err := resolveWorkspaceSelection(store, removeWorkspace)
 				if err != nil {
 					return err
 				}
@@ -90,13 +92,16 @@ func buildWorkspaceLifecycleCommands(deps Dependencies) []*cobra.Command {
 		},
 	}
 	remove.Flags().Bool("yes", false, "confirm configured operation")
+	remove.Flags().StringVar(&removeWorkspace, "workspace", "", "workspace name or ID (defaults to current directory)")
+
+	recoverWorkspace := ""
 	recoverCommand := &cobra.Command{
-		Use:  "recover <workspace>",
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		Use:  "recover",
+		Args: noWorkspacePositionalArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			confirmed, _ := cmd.Flags().GetBool("yes")
 			return withWorkspaceRecoveryRuntime(cmd.Context(), deps, func(root *hostroot.Root, store *state.Store, backend *docker.Adapter, service *workspaceservice.DockerService, _ config.HostConfig) error {
-				record, err := resolveWorkspace(store, args[0])
+				record, err := resolveWorkspaceSelection(store, recoverWorkspace)
 				if err != nil {
 					return err
 				}
@@ -124,6 +129,7 @@ func buildWorkspaceLifecycleCommands(deps Dependencies) []*cobra.Command {
 		},
 	}
 	recoverCommand.Flags().Bool("yes", false, "remove identity-matched resources")
+	recoverCommand.Flags().StringVar(&recoverWorkspace, "workspace", "", "workspace name or ID (defaults to current directory)")
 	return []*cobra.Command{create, start, stop, restart, remove, recoverCommand, rotateHostKey}
 }
 
@@ -352,7 +358,7 @@ func workspaceForDirectory(store *state.Store, prepared preparedWorkspace) (stat
 		}
 	}
 	if len(matches) > 1 {
-		return state.Workspace{}, false, apperr.New(apperr.ExitStateConflict, "state_conflict", "multiple workspaces match %s; remove duplicates or use cohotfs shell <workspace>", prepared.source)
+		return state.Workspace{}, false, apperr.New(apperr.ExitStateConflict, "state_conflict", "multiple workspaces match %s; remove duplicates or use cohotfs shell --workspace <id>", prepared.source)
 	}
 	if len(matches) == 1 {
 		return matches[0], true, nil
@@ -364,9 +370,11 @@ func workspaceForDirectory(store *state.Store, prepared preparedWorkspace) (stat
 }
 
 func workspaceStateCommand(deps Dependencies, use, operationName string, operation func(context.Context, *workspaceservice.DockerService, string, string) (state.Workspace, error)) *cobra.Command {
-	return &cobra.Command{Use: use, Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	command := &cobra.Command{Use: use, Args: noWorkspacePositionalArgs}
+	workspaceName := addWorkspaceFlag(command)
+	command.RunE = func(cmd *cobra.Command, _ []string) error {
 		return withWorkspaceRuntime(cmd.Context(), deps, func(root *hostroot.Root, store *state.Store, _ *docker.Adapter, service *workspaceservice.DockerService, _ config.HostConfig) error {
-			record, err := resolveWorkspace(store, args[0])
+			record, err := resolveWorkspaceSelection(store, *workspaceName)
 			if err != nil {
 				return err
 			}
@@ -382,7 +390,8 @@ func workspaceStateCommand(deps Dependencies, use, operationName string, operati
 			fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\n", record.ID, record.Status)
 			return nil
 		})
-	}}
+	}
+	return command
 }
 
 func withWorkspaceRuntime(ctx context.Context, deps Dependencies, fn func(*hostroot.Root, *state.Store, *docker.Adapter, *workspaceservice.DockerService, config.HostConfig) error) error {

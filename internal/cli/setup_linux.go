@@ -41,13 +41,14 @@ func buildSetupCommand(deps Dependencies) *cobra.Command {
 			return nil
 		},
 	}
+	workspaceName := ""
 	run := &cobra.Command{
-		Use:  "run <workspace>",
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		Use:  "run",
+		Args: noWorkspacePositionalArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			force, _ := cmd.Flags().GetBool("force")
 			return withWorkspaceRuntime(cmd.Context(), deps, func(_ *hostroot.Root, store *state.Store, backend *docker.Adapter, _ *workspaceservice.DockerService, _ config.HostConfig) error {
-				record, err := resolveWorkspace(store, args[0])
+				record, err := resolveWorkspaceSelection(store, workspaceName)
 				if err != nil {
 					return err
 				}
@@ -71,6 +72,7 @@ func buildSetupCommand(deps Dependencies) *cobra.Command {
 		},
 	}
 	run.Flags().Bool("force", false, "rerun a successful setup")
+	run.Flags().StringVar(&workspaceName, "workspace", "", "workspace name or ID (defaults to current directory)")
 	command.AddCommand(validate, run)
 	return command
 }

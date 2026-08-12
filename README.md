@@ -181,29 +181,36 @@ its workspace, starts it when needed, and opens an interactive OpenSSH session.
 It refuses to mount your home directory by default. The exceptional
 `cohotfs --allow-home` path still masks `~/.cohotfs` inside the workspace.
 
-Useful explicit commands:
+Useful current-directory commands:
 
 ```console
 cohotfs workspace create
 cohotfs workspace list
-cohotfs workspace status <workspace>
-cohotfs shell <workspace>
-cohotfs exec <workspace> -- go test ./...
-cohotfs port-forward <workspace> 3000
-cohotfs setup run <workspace>
-cohotfs workspace stop <workspace>
-cohotfs workspace recover <workspace>        # preview identity-matched cleanup
-cohotfs workspace recover <workspace> --yes  # apply it
-cohotfs workspace remove <workspace> --yes
+cohotfs workspace status
+cohotfs shell
+cohotfs exec -- go test ./...
+cohotfs port-forward 3000
+cohotfs setup run
+cohotfs workspace stop
+cohotfs workspace recover        # preview identity-matched cleanup
+cohotfs workspace recover --yes  # apply it
+cohotfs workspace remove --yes
 ```
 
-`port-forward` listens only on host `127.0.0.1` and forwards to the same
+Workspace-targeting commands select the workspace whose canonical source is the
+current directory. Use `--workspace <name-or-id>` to target another workspace,
+for example `cohotfs shell --workspace api` or
+`cohotfs workspace stop --workspace api`.
+
+`port-forward` listens on host `127.0.0.1` and forwards to the same
 container-loopback port through the authenticated workspace SSH transport. Keep
 the command running while using `http://127.0.0.1:3000`; stop it with `Ctrl-C`.
-Use `--local-port 8080` to map host port 8080 to container port 3000. The
-container application may stay bound to `127.0.0.1`; no Docker port is
-published. Workspaces created with an older bootstrap API are rejected with a
-remove/recreate error instead of attempting an unsupported forward.
+Use `--local-port 8080` to map host port 8080 to container port 3000.
+`--host 0.0.0.0` explicitly exposes the host port on every IPv4 interface; use
+it only when other machines must connect. The container application may stay
+bound to `127.0.0.1`; no Docker port is published. Workspaces created with an
+older bootstrap API are rejected with a remove/recreate error instead of
+attempting an unsupported forward.
 
 Inspect runtime negotiation without guessing:
 

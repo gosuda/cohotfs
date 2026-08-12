@@ -29,15 +29,30 @@ func TestParsePortAcceptsOnlyTCPPortRange(t *testing.T) {
 	}
 }
 
-func TestPortForwardArgumentsBindAndTargetIPv4Loopback(t *testing.T) {
-	base := []string{"-F", "/dev/null"}
-	got := portForwardArguments(base, "workspace", 8080, 3000)
-	want := []string{
-		"-F", "/dev/null", "-T", "-N", "-o", "ExitOnForwardFailure=yes",
-		"-L", "127.0.0.1:8080:127.0.0.1:3000", "agent@cohotfs-workspace",
+func TestParseBindHostAllowsOnlyRequestedExposureModes(t *testing.T) {
+	for _, value := range []string{"127.0.0.1", "0.0.0.0"} {
+		if host, err := parseBindHost(value); err != nil || host != value {
+			t.Fatalf("parseBindHost(%q) = %q, %v", value, host, err)
+		}
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("port-forward arguments = %#v, want %#v", got, want)
+	for _, value := range []string{"", "localhost", "::", "192.0.2.1"} {
+		if _, err := parseBindHost(value); err == nil || apperr.Code(err) != apperr.ExitUsage {
+			t.Fatalf("parseBindHost(%q) error = %v", value, err)
+		}
+	}
+}
+
+func TestPortForwardArgumentsBindRequestedHostAndTargetLoopback(t *testing.T) {
+	base := []string{"-F", "/dev/null"}
+	for _, host := range []string{"127.0.0.1", "0.0.0.0"} {
+		got := portForwardArguments(base, host, "workspace", 8080, 3000)
+		want := []string{
+			"-F", "/dev/null", "-T", "-N", "-o", "ExitOnForwardFailure=yes",
+			"-L", host + ":8080:127.0.0.1:3000", "agent@cohotfs-workspace",
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("port-forward %s arguments = %#v, want %#v", host, got, want)
+		}
 	}
 	if !reflect.DeepEqual(base, []string{"-F", "/dev/null"}) {
 		t.Fatalf("port-forward mutated base arguments: %#v", base)
@@ -68,7 +83,7 @@ func TestPortForwardRejectsWorkspaceWithoutCurrentCapability(t *testing.T) {
 
 	for _, workspace := range []string{"old-api", "no-capability"} {
 		var stdout, stderr bytes.Buffer
-		code := Execute(context.Background(), []string{"port-forward", workspace, "3000"}, &stdout, &stderr, testDependencies(rootPath))
+		code := Execute(context.Background(), []string{"port-forward", "3000", "--workspace", workspace}, &stdout, &stderr, testDependencies(rootPath))
 		if code != apperr.ExitStateConflict || !strings.Contains(stderr.String(), "remove and recreate") {
 			t.Fatalf("port-forward %s code=%d stdout=%q stderr=%q", workspace, code, stdout.String(), stderr.String())
 		}
