@@ -94,6 +94,7 @@ func NewRootCommand(deps Dependencies) *cobra.Command {
 		newSetupCommand(deps),
 		buildShellCommand(deps),
 		buildExecCommand(deps),
+		buildPortForwardCommand(deps),
 		buildSSHProxyCommand(deps),
 		buildAgentCommand(deps),
 		newHostCommand(deps),

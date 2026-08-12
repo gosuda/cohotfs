@@ -178,29 +178,37 @@ func withSSHWorkspace(deps Dependencies, cmd *cobra.Command, name string, fn fun
 	})
 }
 
-func runOpenSSH(ctx context.Context, cmd *cobra.Command, root *hostroot.Root, record state.Workspace, terminal bool, remote []string) error {
+func openSSHBaseArguments(root *hostroot.Root, record state.Workspace) (string, []string, error) {
 	sshPath, err := exec.LookPath("ssh")
 	if err != nil {
-		return apperr.Wrap(apperr.ExitUnavailable, "ssh", err, "OpenSSH client is unavailable")
+		return "", nil, apperr.Wrap(apperr.ExitUnavailable, "ssh", err, "OpenSSH client is unavailable")
 	}
 	privateKey, _ := root.HostPath("ssh/id_ed25519")
 	if err := validatePrivateKey(privateKey, root.UID()); err != nil {
-		return err
+		return "", nil, err
 	}
 	knownHosts, err := validateKnownHosts(record)
 	if err != nil {
-		return err
+		return "", nil, err
 	}
 	executable, err := os.Executable()
 	if err != nil {
-		return err
+		return "", nil, err
 	}
 	executable, err = filepath.EvalSymlinks(executable)
 	if err != nil {
-		return err
+		return "", nil, err
 	}
 	proxy := shellQuote(executable) + " ssh-proxy --workspace " + shellQuote(record.ID)
 	arguments := []string{"-F", "/dev/null", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=" + knownHosts, "-o", "ProxyCommand=" + proxy, "-i", privateKey}
+	return sshPath, arguments, nil
+}
+
+func runOpenSSH(ctx context.Context, cmd *cobra.Command, root *hostroot.Root, record state.Workspace, terminal bool, remote []string) error {
+	sshPath, arguments, err := openSSHBaseArguments(root, record)
+	if err != nil {
+		return err
+	}
 	if record.IntegrationGrants["sshAgent"] {
 		if err := validateSSHAgent(os.Getenv("SSH_AUTH_SOCK"), root.UID()); err != nil {
 			return apperr.Wrap(apperr.ExitPolicy, "ssh_agent", err, "SSH agent forwarding grant is unusable: %v", err)

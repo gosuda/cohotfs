@@ -31,7 +31,7 @@ func TestExactTopLevelCommandTree(t *testing.T) {
 		got = append(got, child.Name())
 	}
 	sort.Strings(got)
-	want := []string{"agent", "config", "doctor", "exec", "host", "image", "init", "onboard", "runtime", "setup", "shell", "ssh-proxy", "workspace"}
+	want := []string{"agent", "config", "doctor", "exec", "host", "image", "init", "onboard", "port-forward", "runtime", "setup", "shell", "ssh-proxy", "workspace"}
 	sort.Strings(want)
 	if len(got) != len(want) {
 		t.Fatalf("top-level commands = %v, want %v", got, want)

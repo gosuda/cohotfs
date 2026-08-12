@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gosuda/cohotfs/internal/config"
+	"github.com/gosuda/cohotfs/internal/containeragent"
 	"github.com/gosuda/cohotfs/internal/runtime"
 	"github.com/gosuda/cohotfs/internal/toolchain"
 )
@@ -58,7 +59,7 @@ func CompilePlan(workspace config.Workspace, workspaceID string, ownerUID, owner
 	if backend.Name != workspace.Spec.Runtime.Backend || !backend.Available {
 		return Plan{}, fmt.Errorf("backend is unavailable")
 	}
-	if image.BootstrapAPI != "v1alpha1" {
+	if image.BootstrapAPI != containeragent.BootstrapAPI {
 		return Plan{}, fmt.Errorf("image_incompatible: bootstrap API mismatch")
 	}
 	nonce, err := randomHex(16)

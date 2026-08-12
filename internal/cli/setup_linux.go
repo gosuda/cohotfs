@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/gosuda/cohotfs/internal/config"
+	"github.com/gosuda/cohotfs/internal/containeragent"
 	"github.com/gosuda/cohotfs/internal/hostroot"
 	"github.com/gosuda/cohotfs/internal/runtime/docker"
 	setupservice "github.com/gosuda/cohotfs/internal/setup"
@@ -32,7 +33,7 @@ func buildSetupCommand(deps Dependencies) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			validation, err := setupservice.Validate(cwd, workspace.Spec.Setup, workspace.Spec.Image.Ref, "v1alpha1", os.Getuid(), os.Getgid())
+			validation, err := setupservice.Validate(cwd, workspace.Spec.Setup, workspace.Spec.Image.Ref, containeragent.BootstrapAPI, os.Getuid(), os.Getgid())
 			if err != nil {
 				return err
 			}

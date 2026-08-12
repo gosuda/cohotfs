@@ -11,6 +11,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
@@ -61,6 +63,7 @@ func TestWorkspaceEndToEnd(t *testing.T) {
 		if !bytes.Equal(stdout, payload) || len(stderr) != 0 {
 			t.Fatalf("SSH changed binary stream: got=%d want=%d stderr=%q", len(stdout), len(payload), stderr)
 		}
+		harness.assertPortForward(t, record, source)
 		harness.copyWithSCP(t, record, payload, "/workspace/scp.bin")
 		harness.copyWithSFTP(t, record, payload, "/workspace/sftp.bin")
 		for _, path := range []string{"/workspace/scp.bin", "/workspace/sftp.bin"} {
@@ -507,6 +510,130 @@ func (h *harness) sshOptions(t *testing.T, record state.Workspace) []string {
 	return []string{
 		"-F", "/dev/null", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes",
 		"-o", "LogLevel=ERROR", "-o", "UserKnownHostsFile=" + knownHosts, "-o", "ProxyCommand=" + proxy, "-i", h.privateKey,
+	}
+}
+
+func (h *harness) assertPortForward(t *testing.T, record state.Workspace, source string) {
+	t.Helper()
+	const containerPort = 39001
+	echoSource := filepath.Join(source, "loopback-echo.go")
+	echoBinary := filepath.Join(source, "loopback-echo")
+	program := `package main
+
+import (
+	"io"
+	"net"
+)
+
+func main() {
+	listener, err := net.Listen("tcp4", "127.0.0.1:39001")
+	if err != nil {
+		panic(err)
+	}
+	for {
+		connection, err := listener.Accept()
+		if err != nil {
+			panic(err)
+		}
+		go func() {
+			defer connection.Close()
+			_, _ = io.Copy(connection, connection)
+		}()
+	}
+}
+`
+	if err := os.WriteFile(echoSource, []byte(program), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	build := exec.CommandContext(h.ctx, "go", "build", "-trimpath", "-o", echoBinary, echoSource)
+	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH=amd64")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build loopback echo server: %v: %s", err, output)
+	}
+
+	sshPath, err := exec.LookPath("ssh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverCtx, cancelServer := context.WithCancel(h.ctx)
+	serverArguments := append(h.sshOptions(t, record), "-T", "agent@cohotfs-"+record.ID, "exec /workspace/loopback-echo")
+	server := exec.CommandContext(serverCtx, sshPath, serverArguments...)
+	var serverOutput bytes.Buffer
+	server.Stdout = &serverOutput
+	server.Stderr = &serverOutput
+	if err := server.Start(); err != nil {
+		cancelServer()
+		t.Fatal(err)
+	}
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- server.Wait() }()
+	defer stopIntegrationCommand(cancelServer, server, serverDone)
+
+	reservation, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	localPort := reservation.Addr().(*net.TCPAddr).Port
+	if err := reservation.Close(); err != nil {
+		t.Fatal(err)
+	}
+	forwardCtx, cancelForward := context.WithCancel(h.ctx)
+	forward := fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", localPort, containerPort)
+	forwardArguments := append(h.sshOptions(t, record),
+		"-T", "-N", "-o", "ExitOnForwardFailure=yes",
+		"-L", forward, "agent@cohotfs-"+record.ID,
+	)
+	forwardCommand := exec.CommandContext(forwardCtx, sshPath, forwardArguments...)
+	var forwardOutput bytes.Buffer
+	forwardCommand.Stdout = &forwardOutput
+	forwardCommand.Stderr = &forwardOutput
+	if err := forwardCommand.Start(); err != nil {
+		cancelForward()
+		t.Fatal(err)
+	}
+	forwardDone := make(chan error, 1)
+	go func() { forwardDone <- forwardCommand.Wait() }()
+	defer stopIntegrationCommand(cancelForward, forwardCommand, forwardDone)
+
+	payload := []byte("cohotfs localhost forwarding\n")
+	deadline := time.Now().Add(10 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-serverDone:
+			serverDone <- err
+			t.Fatalf("loopback echo server exited: %v: %s", err, serverOutput.String())
+		case err := <-forwardDone:
+			forwardDone <- err
+			t.Fatalf("OpenSSH port forward exited: %v: %s", err, forwardOutput.String())
+		default:
+		}
+		connection, err := net.DialTimeout("tcp4", fmt.Sprintf("127.0.0.1:%d", localPort), 200*time.Millisecond)
+		if err == nil {
+			_ = connection.SetDeadline(time.Now().Add(time.Second))
+			echoed := make([]byte, len(payload))
+			_, writeErr := connection.Write(payload)
+			_, readErr := io.ReadFull(connection, echoed)
+			_ = connection.Close()
+			if writeErr == nil && readErr == nil && bytes.Equal(echoed, payload) {
+				return
+			}
+			lastErr = errors.Join(writeErr, readErr)
+		} else {
+			lastErr = err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("localhost forward did not echo payload: %v\nserver: %s\nforward: %s", lastErr, serverOutput.String(), forwardOutput.String())
+}
+
+func stopIntegrationCommand(cancel context.CancelFunc, command *exec.Cmd, done <-chan error) {
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		_ = command.Process.Kill()
+		<-done
 	}
 }
 

@@ -85,7 +85,7 @@ for them; they are not copied into images or durable workspace state.
 | Isolation | Standard OCI isolation; optional fail-closed Docker gVisor runtime |
 | Images | Pull/resolve `image.ref` by digest, explicit BuildKit-backed `cohotfs image build`, local-only `pullPolicy: never`, Cohotfs base compatibility probe |
 | Lifecycle | Create, start, stop, restart, inspect, list, remove, recover, and rotate SSH host keys |
-| Interactive access | Host OpenSSH shell and command execution through an identity-checked Unix socket |
+| Interactive access | Host OpenSSH shell, command execution, and loopback-only local port forwarding through an identity-checked Unix socket |
 | Setup | `once`, `always`, and `manual` repository setup; mapped host UID/GID; explicit retry/force; bounded output and timeout handling |
 | Host toolchains | Native Linux Go/Rust discovery; read-only toolchain roots; COW or isolated managed caches |
 | Browser | Fresh-profile Linux Chrome CDP; native Windows Chrome from WSL through the companion bridge |
@@ -189,12 +189,21 @@ cohotfs workspace list
 cohotfs workspace status <workspace>
 cohotfs shell <workspace>
 cohotfs exec <workspace> -- go test ./...
+cohotfs port-forward <workspace> 3000
 cohotfs setup run <workspace>
 cohotfs workspace stop <workspace>
 cohotfs workspace recover <workspace>        # preview identity-matched cleanup
 cohotfs workspace recover <workspace> --yes  # apply it
 cohotfs workspace remove <workspace> --yes
 ```
+
+`port-forward` listens only on host `127.0.0.1` and forwards to the same
+container-loopback port through the authenticated workspace SSH transport. Keep
+the command running while using `http://127.0.0.1:3000`; stop it with `Ctrl-C`.
+Use `--local-port 8080` to map host port 8080 to container port 3000. The
+container application may stay bound to `127.0.0.1`; no Docker port is
+published. Workspaces created with an older bootstrap API are rejected with a
+remove/recreate error instead of attempting an unsupported forward.
 
 Inspect runtime negotiation without guessing:
 

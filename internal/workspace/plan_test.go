@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gosuda/cohotfs/internal/config"
+	"github.com/gosuda/cohotfs/internal/containeragent"
 	"github.com/gosuda/cohotfs/internal/runtime"
 )
 
@@ -14,7 +15,7 @@ func availableDocker() runtime.BackendInfo {
 
 func TestCompilePlanDefaultsAndResources(t *testing.T) {
 	workspace := config.BuiltinWorkspace("api", "example.invalid/base:dev")
-	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: "v1alpha1"}
+	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI}
 	plan, err := CompilePlan(workspace, "workspace", 1000, 1000, t.TempDir(), "manifest", image, "", "/tmp/ssh.sock", availableDocker())
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +40,7 @@ func TestCompilePlanDefaultsAndResources(t *testing.T) {
 
 func TestCompilePlanRejectsAbsentDirectoryTransport(t *testing.T) {
 	workspace := config.BuiltinWorkspace("api", "example.invalid/base:dev")
-	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: "v1alpha1"}
+	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI}
 	if _, err := CompilePlan(workspace, "workspace", 1000, 1000, t.TempDir(), "manifest", image, "", "", availableDocker()); err == nil || !runtime.IsUnsupported(err) {
 		t.Fatalf("missing directory transport error = %v", err)
 	}
@@ -48,7 +49,7 @@ func TestCompilePlanRejectsAbsentDirectoryTransport(t *testing.T) {
 func TestCompilePlanGVisorFailClosed(t *testing.T) {
 	workspace := config.BuiltinWorkspace("api", "example.invalid/base:dev")
 	workspace.Spec.Runtime.Isolation = "gvisor"
-	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: "v1alpha1"}
+	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI}
 	if _, err := CompilePlan(workspace, "workspace", 1000, 1000, t.TempDir(), "manifest", image, "", "/tmp/ssh.sock", availableDocker()); err == nil {
 		t.Fatal("accepted gVisor without configured alias")
 	}
@@ -61,7 +62,7 @@ func TestCompilePlanGVisorFailClosed(t *testing.T) {
 
 func TestRuntimeSpecContainsIdentityLabelsAndBootstrap(t *testing.T) {
 	workspace := config.BuiltinWorkspace("api", "example.invalid/base:dev")
-	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: "v1alpha1"}
+	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI}
 	plan, err := CompilePlan(workspace, "workspace", 1000, 1000, t.TempDir(), "manifest", image, "", filepath.Join(t.TempDir(), "ssh.sock"), availableDocker())
 	if err != nil {
 		t.Fatal(err)

@@ -2,12 +2,14 @@ package docker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/gosuda/cohotfs/internal/containeragent"
 	"github.com/gosuda/cohotfs/internal/runtime"
 	"github.com/moby/moby/client"
 )
@@ -42,6 +44,15 @@ func TestCompatibilityProbeMarksOnlySuccessfulCheck(t *testing.T) {
 		client.WithHTTPClient(&http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 			switch {
 			case request.Method == http.MethodPost && request.URL.Path == "/v1.55/containers/create":
+				var create struct {
+					Cmd []string `json:"Cmd"`
+				}
+				if err := json.NewDecoder(request.Body).Decode(&create); err != nil {
+					return nil, err
+				}
+				if len(create.Cmd) != 3 || create.Cmd[0] != "check" || create.Cmd[1] != "--bootstrap-api" || create.Cmd[2] != containeragent.BootstrapAPI {
+					return nil, fmt.Errorf("compatibility command = %#v", create.Cmd)
+				}
 				return jsonResponse(http.StatusCreated, `{"Id":"check-id"}`), nil
 			case request.Method == http.MethodPost && request.URL.Path == "/v1.55/containers/check-id/start":
 				return &http.Response{StatusCode: http.StatusNoContent, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(""))}, nil
@@ -63,7 +74,7 @@ func TestCompatibilityProbeMarksOnlySuccessfulCheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if image.BootstrapAPI != "v1alpha1" || !removed {
+	if image.BootstrapAPI != containeragent.BootstrapAPI || !removed {
 		t.Fatalf("probe result = %#v removed=%v", image, removed)
 	}
 }

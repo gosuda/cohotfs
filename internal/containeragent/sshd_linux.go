@@ -236,8 +236,9 @@ UsePAM no
 PermitRootLogin no
 PermitUserEnvironment no
 X11Forwarding no
-AllowTcpForwarding no
+AllowTcpForwarding local
 AllowStreamLocalForwarding no
+PermitOpen 127.0.0.1:*
 AllowAgentForwarding %s
 GatewayPorts no
 PermitTunnel no

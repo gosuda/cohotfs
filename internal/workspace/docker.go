@@ -247,7 +247,7 @@ func (s *DockerService) Create(ctx context.Context, request CreateRequest) (resu
 	record := state.Workspace{
 		ID: id, Name: plan.Name, OwnerUID: plan.OwnerUID, OwnerGID: plan.OwnerGID,
 		CanonicalSource: plan.CanonicalSource, ManifestDigest: plan.ManifestDigest, Backend: plan.Backend,
-		Capabilities: request.BackendInfo.Capabilities, ImageDigest: plan.Image.Digest,
+		Capabilities: request.BackendInfo.Capabilities, ImageDigest: plan.Image.Digest, BootstrapAPI: plan.Image.BootstrapAPI,
 		ContainerUID: plan.ContainerUID, ContainerGID: plan.ContainerGID, IntegrationGrants: plan.Integrations,
 		Status: state.StatusCreating, CreatedAt: now, UpdatedAt: now,
 	}
@@ -411,7 +411,8 @@ func validateCreatingRecord(request CreateRequest, record state.Workspace) error
 	if record.ID == "" || record.Name != request.Workspace.Metadata.Name ||
 		record.OwnerUID != request.OwnerUID || record.OwnerGID != request.OwnerGID ||
 		record.CanonicalSource != request.CanonicalSource || record.ManifestDigest != request.ManifestDigest ||
-		record.Backend != request.BackendInfo.Name || record.ImageDigest != request.Image.Digest {
+		record.Backend != request.BackendInfo.Name || record.ImageDigest != request.Image.Digest ||
+		record.BootstrapAPI != request.Image.BootstrapAPI {
 		return fmt.Errorf("persisted creating workspace identity does not match the operation")
 	}
 	return nil
@@ -457,6 +458,7 @@ func creatingPlanMatches(request CreateRequest, record state.Workspace, plan Pla
 		plan.OwnerUID == record.OwnerUID && plan.OwnerGID == record.OwnerGID &&
 		plan.CanonicalSource == record.CanonicalSource && plan.ManifestDigest == record.ManifestDigest &&
 		plan.Backend == record.Backend && plan.Image.Digest == record.ImageDigest &&
+		plan.Image.BootstrapAPI == record.BootstrapAPI && request.Image.BootstrapAPI == plan.Image.BootstrapAPI &&
 		plan.CreationNonce != "" && plan.ContainerUID == record.ContainerUID && plan.ContainerGID == record.ContainerGID &&
 		request.Image.Digest == plan.Image.Digest
 }
@@ -627,7 +629,7 @@ func (s *DockerService) prepareBootstrap(id, publicKeySource string, plan *Plan,
 		EnableGitCredentials bool   `json:"enableGitCredentials"`
 		EnableAgentSecrets   bool   `json:"enableAgentSecrets"`
 	}{
-		BootstrapAPI: "v1alpha1", WorkspaceID: id, OwnerUID: plan.OwnerUID, OwnerGID: plan.OwnerGID,
+		BootstrapAPI: containeragent.BootstrapAPI, WorkspaceID: id, OwnerUID: plan.OwnerUID, OwnerGID: plan.OwnerGID,
 		AuthorizedKeyPath: "/run/cohotfs/bootstrap/authorized_keys", AllowAgentForwarding: plan.Integrations["sshAgent"],
 		EnableCDP:            plan.Integrations["browser"],
 		EnableGitCredentials: plan.Integrations["gitCredentials"], EnableAgentSecrets: anyAgentEnabled(plan.IntegrationSettings.Agents),
@@ -652,6 +654,9 @@ func (s *DockerService) Start(ctx context.Context, id, key string) (state.Worksp
 func (s *DockerService) startLocked(ctx context.Context, record state.Workspace) (state.Workspace, error) {
 	if err := toolchain.ValidateResources(record.Resources); err != nil {
 		return record, fmt.Errorf("toolchain resource identity mismatch: %w", err)
+	}
+	if record.BootstrapAPI != containeragent.BootstrapAPI {
+		return record, apperr.New(apperr.ExitStateConflict, "state_conflict", "workspace %s uses bootstrap API %q; remove and recreate it for %s", record.ID, record.BootstrapAPI, containeragent.BootstrapAPI)
 	}
 	resuming := record.Status == state.StatusStarting || record.Status == state.StatusSetup
 	if !resuming && record.Status != state.StatusStopped && record.Status != state.StatusSetupFailed && record.Status != state.StatusError {
@@ -700,6 +705,7 @@ func (s *DockerService) startLocked(ctx context.Context, record state.Workspace)
 	if err != nil {
 		return failStarted(err)
 	}
+	record.TCPForwarding = ready.TCPForwarding
 	if err := s.pinSSHHostKey(ctx, &record, ready.SSHHostFingerprint); err != nil {
 		return failStarted(err)
 	}

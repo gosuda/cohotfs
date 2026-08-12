@@ -120,6 +120,7 @@ func (f *lifecycleBackend) ExecSync(_ context.Context, _ runtime.WorkspaceRef, r
 		}
 		output, err := json.Marshal(containeragent.Ready{
 			BootstrapAPI: containeragent.BootstrapAPI, SSHAddress: "127.0.0.1:2222", SSHHostFingerprint: fingerprint,
+			SSHRelay: true, TCPForwarding: true,
 		})
 		if err != nil {
 			return runtime.ExecResult{}, err
@@ -199,7 +200,7 @@ func TestDockerServiceCreateStartStopRemove(t *testing.T) {
 	if err := os.WriteFile(publicKey, []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockMockMockMockMockMockMockMockMockMock test\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: "v1alpha1"}
+	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI}
 	createRequest := CreateRequest{OperationKey: t.Name() + "/create", Workspace: workspace, CanonicalSource: t.TempDir(), ManifestDigest: "manifest", OwnerUID: 1000, OwnerGID: 1000, Image: image, BackendInfo: availableDocker(), SSHSocketPath: testSSHSocket(t), BootstrapSource: publicKey, MaskCohotfsRoot: true}
 	record, err := service.Create(context.Background(), createRequest)
 	if err != nil {
@@ -214,7 +215,7 @@ func TestDockerServiceCreateStartStopRemove(t *testing.T) {
 	if _, err := service.Create(context.Background(), changedRequest); err == nil || apperr.Code(err) != apperr.ExitStateConflict {
 		t.Fatalf("changed create replay error = %v", err)
 	}
-	if record.Status != state.StatusStopped || record.RuntimeRef.IDs["container"] != "container" || backend.created.Labels[LabelCreationNonce] == "" {
+	if record.Status != state.StatusStopped || record.RuntimeRef.IDs["container"] != "container" || backend.created.Labels[LabelCreationNonce] == "" || record.BootstrapAPI != containeragent.BootstrapAPI || record.TCPForwarding {
 		t.Fatalf("created record=%#v request=%#v", record, backend.created)
 	}
 	var foundCohotfsMask, foundHome, foundSystem bool
@@ -243,7 +244,7 @@ func TestDockerServiceCreateStartStopRemove(t *testing.T) {
 	}
 	startKey := t.Name() + "/start"
 	record, err = service.Start(context.Background(), record.ID, startKey)
-	if err != nil || record.Status != state.StatusReady || backend.startCalls != 1 {
+	if err != nil || record.Status != state.StatusReady || !record.TCPForwarding || backend.startCalls != 1 {
 		t.Fatalf("start = %#v, calls=%d, err=%v", record, backend.startCalls, err)
 	}
 	replayed, err = service.Start(context.Background(), record.ID, startKey)
@@ -372,7 +373,7 @@ func TestDockerServiceRotatesAndRepinsSSHHostKey(t *testing.T) {
 	if err := os.WriteFile(publicKey, []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockMockMockMockMockMockMockMockMockMock test\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: "v1alpha1"}
+	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI}
 	record, err := service.Create(context.Background(), CreateRequest{OperationKey: t.Name() + "/create", Workspace: workspace, CanonicalSource: t.TempDir(), ManifestDigest: "manifest", OwnerUID: 1000, OwnerGID: 1000, Image: image, BackendInfo: availableDocker(), SSHSocketPath: testSSHSocket(t), BootstrapSource: publicKey})
 	if err != nil {
 		t.Fatal(err)
@@ -423,7 +424,7 @@ func TestDockerServiceWaitsForSSHHostKeyGeneration(t *testing.T) {
 	if err := os.WriteFile(publicKey, []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockMockMockMockMockMockMockMockMockMock test\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: "v1alpha1"}
+	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI}
 	record, err := service.Create(context.Background(), CreateRequest{OperationKey: t.Name() + "/create", Workspace: workspace, CanonicalSource: t.TempDir(), ManifestDigest: "manifest", OwnerUID: 1000, OwnerGID: 1000, Image: image, BackendInfo: availableDocker(), SSHSocketPath: testSSHSocket(t), BootstrapSource: publicKey})
 	if err != nil {
 		t.Fatal(err)
@@ -455,7 +456,7 @@ func TestDockerServiceRejectsReadinessHostKeyMismatch(t *testing.T) {
 	if err := os.WriteFile(publicKey, []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockMockMockMockMockMockMockMockMockMock test\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: "v1alpha1"}
+	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI}
 	record, err := service.Create(context.Background(), CreateRequest{OperationKey: t.Name() + "/create", Workspace: workspace, CanonicalSource: t.TempDir(), ManifestDigest: "manifest", OwnerUID: 1000, OwnerGID: 1000, Image: image, BackendInfo: availableDocker(), SSHSocketPath: testSSHSocket(t), BootstrapSource: publicKey})
 	if err != nil {
 		t.Fatal(err)
@@ -493,7 +494,7 @@ func TestDockerServiceAutomaticSetupModes(t *testing.T) {
 			if err := os.WriteFile(publicKey, []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockMockMockMockMockMockMockMockMockMock test\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: "v1alpha1"}
+			image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI}
 			record, err := service.Create(context.Background(), CreateRequest{OperationKey: t.Name() + "/create", Workspace: workspace, CanonicalSource: source, ManifestDigest: "manifest", OwnerUID: 1000, OwnerGID: 1000, Image: image, BackendInfo: availableDocker(), SSHSocketPath: testSSHSocket(t), BootstrapSource: publicKey})
 			if err != nil {
 				t.Fatal(err)
@@ -542,7 +543,7 @@ func TestDockerServiceAutomaticSetupFailureStopsWorkspace(t *testing.T) {
 	if err := os.WriteFile(publicKey, []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockMockMockMockMockMockMockMockMockMock test\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: "v1alpha1"}
+	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI}
 	record, err := service.Create(context.Background(), CreateRequest{OperationKey: t.Name() + "/create", Workspace: workspace, CanonicalSource: source, ManifestDigest: "manifest", OwnerUID: 1000, OwnerGID: 1000, Image: image, BackendInfo: availableDocker(), SSHSocketPath: testSSHSocket(t), BootstrapSource: publicKey})
 	if err != nil {
 		t.Fatal(err)
@@ -561,7 +562,7 @@ func TestCreateOperationBodyExcludesSecretsAndVolatileProbeMetadata(t *testing.T
 	request := CreateRequest{
 		Workspace:       config.BuiltinWorkspace("api", "example.invalid/base:dev"),
 		CanonicalSource: "/source", ManifestDigest: "manifest", OwnerUID: 1000, OwnerGID: 1000,
-		Image:           runtime.ResolvedImage{Reference: "example.invalid/base:dev", Digest: "sha256:digest", BootstrapAPI: "v1alpha1", ResolvedAt: time.Unix(1, 0)},
+		Image:           runtime.ResolvedImage{Reference: "example.invalid/base:dev", Digest: "sha256:digest", BootstrapAPI: containeragent.BootstrapAPI, ResolvedAt: time.Unix(1, 0)},
 		BackendInfo:     runtime.BackendInfo{Name: "docker", Version: "one", Endpoint: "unix:///one", Available: true, Capabilities: map[runtime.Capability]bool{runtime.CapabilityHostSocketBind: true}},
 		BootstrapSource: publicKey, Environment: []string{"HOME=/home/user", "SECRET_TOKEN=first"},
 	}
@@ -624,7 +625,7 @@ func TestDockerServiceResumesPersistedCreatingOperation(t *testing.T) {
 				OperationKey: t.Name() + "/create", Workspace: workspace, CanonicalSource: t.TempDir(),
 				ManifestDigest: "manifest", OwnerUID: 1000, OwnerGID: 1000,
 				Image: runtime.ResolvedImage{
-					Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: "v1alpha1",
+					Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI,
 				},
 				BackendInfo: availableDocker(), BootstrapSource: publicKey,
 				SSHSocketPath: testSSHSocket(t),
@@ -637,7 +638,7 @@ func TestDockerServiceResumesPersistedCreatingOperation(t *testing.T) {
 			record := state.Workspace{
 				ID: id, Name: workspace.Metadata.Name, OwnerUID: request.OwnerUID, OwnerGID: request.OwnerGID,
 				CanonicalSource: request.CanonicalSource, ManifestDigest: request.ManifestDigest, Backend: "docker",
-				ImageDigest: request.Image.Digest, ContainerUID: request.OwnerUID, ContainerGID: request.OwnerGID,
+				ImageDigest: request.Image.Digest, BootstrapAPI: request.Image.BootstrapAPI, ContainerUID: request.OwnerUID, ContainerGID: request.OwnerGID,
 				Status: state.StatusCreating, CreatedAt: now, UpdatedAt: now,
 			}
 			if testCase.persistRuntime {
@@ -730,7 +731,7 @@ func TestDockerServiceQuarantinesCreatingRuntimeWithoutPlan(t *testing.T) {
 		OperationKey: t.Name() + "/create", Workspace: workspace, CanonicalSource: t.TempDir(),
 		ManifestDigest: "manifest", OwnerUID: 1000, OwnerGID: 1000,
 		Image: runtime.ResolvedImage{
-			Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: "v1alpha1",
+			Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI,
 		},
 		BackendInfo: availableDocker(), BootstrapSource: publicKey,
 		SSHSocketPath: testSSHSocket(t),

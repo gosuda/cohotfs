@@ -22,14 +22,14 @@ RUN printf '%s\n' \
     && rm -rf /var/lib/apt/lists/* \
     && rm -f /etc/ssh/ssh_host_* \
     && mkdir -p -m 0700 /.cohotfs /var/lib/cohotfs/system/ssh /run/cohotfs/control \
-    && printf '%s\n' '{"apiVersion":"cohotfs.io/v1alpha1","kind":"CohotfsBase","bootstrapAPI":"v1alpha1","os":"linux","architecture":"amd64","agentPath":"/usr/local/libexec/cohotfs-agent"}' > /.cohotfs/base.json \
+    && printf '%s\n' '{"apiVersion":"cohotfs.io/v1alpha1","kind":"CohotfsBase","bootstrapAPI":"v1alpha2","os":"linux","architecture":"amd64","agentPath":"/usr/local/libexec/cohotfs-agent"}' > /.cohotfs/base.json \
     && chmod 0644 /.cohotfs/base.json
 
 COPY --chmod=0755 cohotfs-agent /usr/local/libexec/cohotfs-agent
 
 LABEL org.opencontainers.image.source="https://github.com/gosuda/cohotfs" \
       org.opencontainers.image.version="${COHOTFS_VERSION}" \
-      io.cohotfs.bootstrap-api="v1alpha1" \
+      io.cohotfs.bootstrap-api="v1alpha2" \
       io.cohotfs.debian-snapshot="${DEBIAN_SNAPSHOT}" \
       io.cohotfs.agent-sha256="${AGENT_SHA256}"
 

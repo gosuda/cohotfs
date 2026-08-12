@@ -10,6 +10,7 @@ import (
 
 	"github.com/gosuda/cohotfs/internal/api"
 	"github.com/gosuda/cohotfs/internal/config"
+	"github.com/gosuda/cohotfs/internal/containeragent"
 	"github.com/gosuda/cohotfs/internal/hostroot"
 	"github.com/gosuda/cohotfs/internal/runtime"
 	"github.com/gosuda/cohotfs/internal/state"
@@ -73,7 +74,7 @@ func TestIntegrationLeaseFailureRollsBackBeforeContainerStart(t *testing.T) {
 	if err := os.WriteFile(publicKey, []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockMockMockMockMockMockMockMockMockMock test\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: "v1alpha1"}
+	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI}
 	record, err := service.Create(context.Background(), CreateRequest{OperationKey: t.Name() + "/create", Workspace: workspace, CanonicalSource: t.TempDir(), ManifestDigest: "manifest", OwnerUID: 1000, OwnerGID: 1000, Image: image, BackendInfo: availableDocker(), SSHSocketPath: testSSHSocket(t), BootstrapSource: publicKey})
 	if err != nil {
 		t.Fatal(err)

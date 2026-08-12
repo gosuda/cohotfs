@@ -29,6 +29,7 @@ type Ready struct {
 	SSHAddress         string `json:"sshAddress"`
 	SSHHostFingerprint string `json:"sshHostFingerprint"`
 	SSHRelay           bool   `json:"sshRelay"`
+	TCPForwarding      bool   `json:"tcpForwarding"`
 }
 
 func ValidateReady(ready Ready) error {
@@ -37,6 +38,9 @@ func ValidateReady(ready Ready) error {
 	}
 	if ready.SSHAddress != "127.0.0.1:2222" {
 		return fmt.Errorf("readiness SSH address is %q", ready.SSHAddress)
+	}
+	if !ready.SSHRelay || !ready.TCPForwarding {
+		return fmt.Errorf("readiness transport capabilities are incomplete")
 	}
 	encoded, ok := strings.CutPrefix(ready.SSHHostFingerprint, "SHA256:")
 	if !ok {
@@ -144,7 +148,7 @@ func Serve(ctx context.Context, bootstrapPath string) error {
 		_ = sshd.Process.Kill()
 		return err
 	}
-	ready := Ready{BootstrapAPI: BootstrapAPI, SSHAddress: "127.0.0.1:2222", SSHHostFingerprint: fingerprint, SSHRelay: true}
+	ready := Ready{BootstrapAPI: BootstrapAPI, SSHAddress: "127.0.0.1:2222", SSHHostFingerprint: fingerprint, SSHRelay: true, TCPForwarding: true}
 	go func() { helperErrors <- serveReadiness(helperCtx, defaultReadySocket, ready) }()
 
 	for {

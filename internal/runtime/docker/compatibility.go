@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gosuda/cohotfs/internal/containeragent"
 	"github.com/gosuda/cohotfs/internal/runtime"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
@@ -24,7 +25,7 @@ func (a *Adapter) CheckCompatibility(ctx context.Context, image runtime.Resolved
 		Config: &container.Config{
 			Image:      image.Digest,
 			Entrypoint: []string{"/usr/local/libexec/cohotfs-agent"},
-			Cmd:        []string{"check", "--bootstrap-api", "v1alpha1"},
+			Cmd:        []string{"check", "--bootstrap-api", containeragent.BootstrapAPI},
 			User:       "0:0", AttachStdout: true, AttachStderr: true,
 			Labels: map[string]string{"io.cohotfs.check": "image-compatibility"},
 		},
@@ -57,6 +58,6 @@ func (a *Adapter) CheckCompatibility(ctx context.Context, image runtime.Resolved
 	case <-time.After(30 * time.Second):
 		return runtime.ResolvedImage{}, fmt.Errorf("image_incompatible: check timed out")
 	}
-	image.BootstrapAPI = "v1alpha1"
+	image.BootstrapAPI = containeragent.BootstrapAPI
 	return image, nil
 }

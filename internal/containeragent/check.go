@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-const BootstrapAPI = "v1alpha1"
+const BootstrapAPI = "v1alpha2"
 
 type BaseMarker struct {
 	APIVersion   string `json:"apiVersion"`

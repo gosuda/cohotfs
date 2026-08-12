@@ -87,6 +87,8 @@ type Workspace struct {
 	RuntimeRef         runtime.WorkspaceRef        `json:"runtimeRef"`
 	Capabilities       map[runtime.Capability]bool `json:"capabilities,omitempty"`
 	ImageDigest        string                      `json:"imageDigest"`
+	BootstrapAPI       string                      `json:"bootstrapAPI,omitempty"`
+	TCPForwarding      bool                        `json:"tcpForwarding,omitempty"`
 	ContainerUID       int                         `json:"containerUID"`
 	ContainerGID       int                         `json:"containerGID"`
 	Mounts             []MountRecord               `json:"mounts,omitempty"`

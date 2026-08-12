@@ -62,7 +62,7 @@ func TestWorkspaceLockAndLifecycle(t *testing.T) {
 		t.Fatalf("second lock error = %v", err)
 	}
 
-	workspace := Workspace{ID: id, Name: "test", Status: StatusCreating, CreatedAt: time.Unix(1, 0)}
+	workspace := Workspace{ID: id, Name: "test", BootstrapAPI: "bootstrap", TCPForwarding: true, Status: StatusCreating, CreatedAt: time.Unix(1, 0)}
 	if err := workspace.Transition(StatusReady, time.Unix(2, 0)); err == nil {
 		t.Fatal("accepted creating -> ready")
 	}
@@ -76,7 +76,7 @@ func TestWorkspaceLockAndLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != StatusStarting || got.SchemaVersion != SchemaVersion {
+	if got.Status != StatusStarting || got.SchemaVersion != SchemaVersion || got.BootstrapAPI != "bootstrap" || !got.TCPForwarding {
 		t.Fatalf("loaded workspace = %#v", got)
 	}
 }

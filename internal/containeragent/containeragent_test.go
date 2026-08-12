@@ -93,6 +93,8 @@ func TestProbeReadinessRequiresLiveValidatedProtocol(t *testing.T) {
 		BootstrapAPI:       BootstrapAPI,
 		SSHAddress:         "127.0.0.1:2222",
 		SSHHostFingerprint: "SHA256:" + base64.RawStdEncoding.EncodeToString(make([]byte, 32)),
+		SSHRelay:           true,
+		TCPForwarding:      true,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	socket := filepath.Join(t.TempDir(), "ready.sock")
@@ -165,8 +167,8 @@ func TestDecodeReadyRejectsMalformedProtocol(t *testing.T) {
 	fingerprint := "SHA256:" + base64.RawStdEncoding.EncodeToString(make([]byte, 32))
 	for _, raw := range []string{
 		`{"bootstrapAPI":"future","sshAddress":"127.0.0.1:2222","sshHostFingerprint":"` + fingerprint + `"}`,
-		`{"bootstrapAPI":"v1alpha1","sshAddress":"127.0.0.1:2222","sshHostFingerprint":"invalid"}`,
-		`{"bootstrapAPI":"v1alpha1","sshAddress":"127.0.0.1:2222","sshHostFingerprint":"` + fingerprint + `","unknown":true}`,
+		`{"bootstrapAPI":"v1alpha2","sshAddress":"127.0.0.1:2222","sshHostFingerprint":"invalid","sshRelay":true,"tcpForwarding":true}`,
+		`{"bootstrapAPI":"v1alpha2","sshAddress":"127.0.0.1:2222","sshHostFingerprint":"` + fingerprint + `","sshRelay":true,"tcpForwarding":true,"unknown":true}`,
 	} {
 		if _, err := DecodeReady(strings.NewReader(raw)); err == nil {
 			t.Fatalf("accepted malformed readiness response %s", raw)
@@ -177,9 +179,9 @@ func TestDecodeReadyRejectsMalformedProtocol(t *testing.T) {
 func TestBootstrapStrictnessAndIdentityConflicts(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bootstrap.json")
 	for _, raw := range []string{
-		`{"bootstrapAPI":"v1alpha1","workspaceID":"aaaaaaaaaaaaaaaaaaaaaaaaaa","ownerUID":1000,"ownerGID":1000,"authorizedKeyPath":"/run/cohotfs/bootstrap/key.pub","unexpected":true}`,
-		`{"bootstrapAPI":"v1alpha1","bootstrapAPI":"v1alpha1","workspaceID":"aaaaaaaaaaaaaaaaaaaaaaaaaa","ownerUID":1000,"ownerGID":1000,"authorizedKeyPath":"/run/cohotfs/bootstrap/key.pub"}`,
-		`{"bootstrapAPI":"v1alpha1","workspaceID":"aaaaaaaaaaaaaaaaaaaaaaaaaa","ownerUID":1000,"ownerGID":1000,"authorizedKeyPath":"/run/cohotfs/bootstrap/key.pub"} {}`,
+		`{"bootstrapAPI":"v1alpha2","workspaceID":"aaaaaaaaaaaaaaaaaaaaaaaaaa","ownerUID":1000,"ownerGID":1000,"authorizedKeyPath":"/run/cohotfs/bootstrap/key.pub","unexpected":true}`,
+		`{"bootstrapAPI":"v1alpha2","bootstrapAPI":"v1alpha2","workspaceID":"aaaaaaaaaaaaaaaaaaaaaaaaaa","ownerUID":1000,"ownerGID":1000,"authorizedKeyPath":"/run/cohotfs/bootstrap/key.pub"}`,
+		`{"bootstrapAPI":"v1alpha2","workspaceID":"aaaaaaaaaaaaaaaaaaaaaaaaaa","ownerUID":1000,"ownerGID":1000,"authorizedKeyPath":"/run/cohotfs/bootstrap/key.pub"} {}`,
 	} {
 		if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 			t.Fatal(err)
@@ -217,7 +219,7 @@ func TestAuthorizedKeyAndSSHDConfig(t *testing.T) {
 		t.Fatalf("installed key = %q, %v", installed, err)
 	}
 	config := RenderSSHDConfig("/key", "/authorized", false)
-	for _, required := range []string{"ListenAddress 127.0.0.1", "PermitRootLogin no", "PasswordAuthentication no", "AllowTcpForwarding no", "AllowStreamLocalForwarding no", "AllowAgentForwarding no", "AllowUsers agent"} {
+	for _, required := range []string{"ListenAddress 127.0.0.1", "PermitRootLogin no", "PasswordAuthentication no", "AllowTcpForwarding local", "AllowStreamLocalForwarding no", "PermitOpen 127.0.0.1:*", "AllowAgentForwarding no", "AllowUsers agent"} {
 		if !strings.Contains(config, required) {
 			t.Fatalf("sshd config missing %q", required)
 		}
