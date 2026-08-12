@@ -8,6 +8,11 @@
 *.so
 *.dylib
 
+# Repository-root command binaries
+/cohotfs
+/cohotfs-agent
+/cohotfs-windows-bridge
+
 # Test binary, built with `go test -c`
 *.test
 

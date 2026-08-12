@@ -1,0 +1,36 @@
+# syntax=docker/dockerfile:1.7
+FROM debian:stable-slim@sha256:0ef0f77425e6677ead26f893cb61707f7fc44467a480625d8974feb7ab2085fe
+
+ARG DEBIAN_SNAPSHOT=20260803T000000Z
+ARG COHOTFS_VERSION=dev
+ARG AGENT_SHA256=unknown
+
+RUN printf '%s\n' \
+      'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260803T000000Z trixie main' \
+      > /etc/apt/sources.list \
+    && rm -f /etc/apt/sources.list.d/* \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      ca-certificates \
+      coreutils \
+      dash \
+      findutils \
+      git \
+      openssh-server \
+      passwd \
+      procps \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -f /etc/ssh/ssh_host_* \
+    && mkdir -p -m 0700 /.cohotfs /var/lib/cohotfs/system/ssh /run/cohotfs/control \
+    && printf '%s\n' '{"apiVersion":"cohotfs.io/v1alpha1","kind":"CohotfsBase","bootstrapAPI":"v1alpha1","os":"linux","architecture":"amd64","agentPath":"/usr/local/libexec/cohotfs-agent"}' > /.cohotfs/base.json \
+    && chmod 0644 /.cohotfs/base.json
+
+COPY --chmod=0755 cohotfs-agent /usr/local/libexec/cohotfs-agent
+
+LABEL org.opencontainers.image.source="https://github.com/gosuda/cohotfs" \
+      org.opencontainers.image.version="${COHOTFS_VERSION}" \
+      io.cohotfs.bootstrap-api="v1alpha1" \
+      io.cohotfs.debian-snapshot="${DEBIAN_SNAPSHOT}" \
+      io.cohotfs.agent-sha256="${AGENT_SHA256}"
+
+ENTRYPOINT ["/usr/local/libexec/cohotfs-agent", "serve"]
