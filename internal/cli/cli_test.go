@@ -51,6 +51,20 @@ func TestExactTopLevelCommandTree(t *testing.T) {
 	}
 }
 
+func TestDefaultImagePullPolicySeparatesDevelopmentAndRelease(t *testing.T) {
+	original := Version
+	t.Cleanup(func() { Version = original })
+
+	Version = "dev"
+	if got := defaultImagePullPolicy(); got != config.ImagePullNever {
+		t.Fatalf("development pull policy = %q", got)
+	}
+	Version = "v0.1.0"
+	if got := defaultImagePullPolicy(); got != config.ImagePullAlways {
+		t.Fatalf("release pull policy = %q", got)
+	}
+}
+
 func TestInitWritesOnlyManifestAndLocalOverride(t *testing.T) {
 	project := t.TempDir()
 	previous, err := os.Getwd()
@@ -71,8 +85,12 @@ func TestInitWritesOnlyManifestAndLocalOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := config.DecodeWorkspace(raw); err != nil {
+	generated, err := config.DecodeWorkspace(raw)
+	if err != nil {
 		t.Fatalf("generated invalid manifest: %v", err)
+	}
+	if generated.Spec.Image.Ref != "ghcr.io/gosuda/cohotfs/workspace-base:dev" || generated.Spec.Image.PullPolicy != config.ImagePullNever {
+		t.Fatalf("generated development image policy = %#v", generated.Spec.Image)
 	}
 	_, _, key, err := config.ProjectIdentity(project)
 	if err != nil {
@@ -214,6 +232,9 @@ func TestPrepareBareWorkspaceMountsCurrentDirectoryWithoutManifest(t *testing.T)
 	}
 	if prepared.workspace.Metadata.Name != "project-with-spaces" {
 		t.Fatalf("implicit workspace name = %q", prepared.workspace.Metadata.Name)
+	}
+	if prepared.workspace.Spec.Image.PullPolicy != config.ImagePullNever {
+		t.Fatalf("implicit development image pull policy = %q", prepared.workspace.Spec.Image.PullPolicy)
 	}
 	if prepared.digest == "" {
 		t.Fatal("implicit workspace digest is empty")

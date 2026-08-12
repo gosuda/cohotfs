@@ -297,3 +297,34 @@ func TestBuildReturnsClosedEventsOnPlanningFailure(t *testing.T) {
 		t.Fatal("planning failure returned a blocking event channel")
 	}
 }
+
+func TestResolveLocalInspectsWithoutRegistryPull(t *testing.T) {
+	const reference = "ghcr.io/gosuda/cohotfs/workspace-base:dev"
+	imageID := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	var pulled bool
+	apiClient, err := client.New(
+		client.WithHost("http://docker.test"),
+		client.WithAPIVersion("1.55"),
+		client.WithHTTPClient(&http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if strings.Contains(request.URL.Path, "/images/create") {
+				pulled = true
+				return nil, fmt.Errorf("unexpected registry pull")
+			}
+			if request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/images/") {
+				return jsonResponse(http.StatusOK, fmt.Sprintf(`{"Id":%q,"Os":"linux","Architecture":"amd64"}`, imageID)), nil
+			}
+			return nil, fmt.Errorf("unexpected request %s %s", request.Method, request.URL.Path)
+		})}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := newWithClient(apiClient, "unix:///var/run/docker.sock", "")
+	image, err := adapter.ResolveLocal(context.Background(), runtime.PullRequest{Reference: reference, Platform: "linux/amd64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pulled || image.Reference != reference || image.Digest != imageID {
+		t.Fatalf("local resolution pulled=%t image=%#v", pulled, image)
+	}
+}

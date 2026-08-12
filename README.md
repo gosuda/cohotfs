@@ -29,7 +29,7 @@ Cohotfs keeps the host as the control plane:
 - the container never receives a Docker/runtime socket;
 - host SSH private keys, browser profiles, and agent authentication databases are
   not mounted;
-- every persistent Cohotfs artifact lives below a user-owned `~/.cohotfs`;
+- every host-side Cohotfs file and socket lives below a user-owned `~/.cohotfs`;
 - requested capabilities are checked before resources are created;
 - interrupted operations are journaled and recoverable; and
 - `isolation: gvisor` fails closed when the configured runtime is unavailable. It
@@ -45,11 +45,11 @@ For each operation, the host-side `cohotfs` process resolves strict configuratio
 probes the selected runtime, and compiles a complete redacted workspace plan before
 making changes. It then:
 
-1. resolves or builds a compatible Cohotfs base image by immutable digest;
-2. creates an unprivileged container with the requested source, limits, and
+1. resolves a compatible Cohotfs base image by immutable digest;
+2. creates a non-privileged container with the requested source, limits, and
    explicitly granted integrations;
-3. starts `cohotfs-agent` as PID 1 inside the container;
-4. creates an `agent` account with the invoking host user's numeric UID/GID;
+3. starts `cohotfs-agent` as PID 1 and container root;
+4. creates an `agent` account whose numeric UID/GID match the invoking host user;
 5. generates a per-workspace SSH host key and starts a restrictive `sshd` on
    container loopback;
 6. pins that host key under a workspace-specific alias; and
@@ -83,11 +83,10 @@ for them; they are not copied into images or durable workspace state.
 | Runtime | Local Docker Engine through a pathname Unix socket |
 | Workspace platform | `linux/amd64` |
 | Isolation | Standard OCI isolation; optional fail-closed Docker gVisor runtime |
-| Images | Pull by reference, resolve by digest, BuildKit-backed Docker builds, Cohotfs base compatibility probe |
+| Images | Pull/resolve `image.ref` by digest, explicit BuildKit-backed `cohotfs image build`, local-only `pullPolicy: never`, Cohotfs base compatibility probe |
 | Lifecycle | Create, start, stop, restart, inspect, list, remove, recover, and rotate SSH host keys |
 | Interactive access | Host OpenSSH shell and command execution through an identity-checked Unix socket |
-| Setup | `once`, `always`, and `manual` repository setup; explicit retry/force; bounded output and timeout handling |
-| Resources | Optional CPU, memory, total memory+swap, PID, and `nofile` limits |
+| Setup | `once`, `always`, and `manual` repository setup; mapped host UID/GID; explicit retry/force; bounded output and timeout handling |
 | Host toolchains | Native Linux Go/Rust discovery; read-only toolchain roots; COW or isolated managed caches |
 | Browser | Fresh-profile Linux Chrome CDP; native Windows Chrome from WSL through the companion bridge |
 | Credentials | Explicit SSH-agent forwarding and allowlisted, read-only Git HTTPS credential brokering |
@@ -104,6 +103,9 @@ for them; they are not copied into images or durable workspace state.
   profile, or agent credential database mounted into a workspace.
 - No arbitrary prebuilt image. The final image must retain the matching Cohotfs
   bootstrap contract and its OpenSSH runtime dependencies.
+- Workspace creation does not build `spec.image.build` inline yet. Run
+  `cohotfs image build`, then use its local tag as `image.ref` with
+  `pullPolicy: never`.
 - No generic runtime annotation/option escape hatch.
 
 Docker socket access is itself highly privileged—root-equivalent for a typical
@@ -116,18 +118,27 @@ socket ownership or group membership. Prefer rootless Docker where it fits.
 
 - Linux or WSL2 on an `amd64` host
 - a local Docker Engine reachable by the current user through a Unix socket
+- the Docker CLI for source image builds
 - the host OpenSSH client and `ssh-keygen`
-- a compatible Cohotfs workspace-base image
+- Go 1.26.5 when building from source
 
-Build the host binary from source:
+From the Cohotfs repository root, build the host binary and the matching local
+workspace image:
 
 ```console
+install -d "$HOME/.local/bin"
 go build -o "$HOME/.local/bin/cohotfs" ./cmd/cohotfs
+export PATH="$HOME/.local/bin:$PATH"
+./images/workspace-base/build-local-image.sh
 ```
 
-A source build identifies itself as `dev`; use a matching locally built
-workspace-base image or set `spec.image.ref` to a published version-compatible
-image. Release binaries resolve their matching image tag automatically.
+The helper builds the static in-container agent, creates a temporary Docker build
+context, and tags the result as
+`ghcr.io/gosuda/cohotfs/workspace-base:dev`. A `dev` host binary writes that
+exact reference with `pullPolicy: never`, so workspace creation resolves the
+already-loaded Docker image without contacting GHCR. Pass one optional image tag
+to the helper only when you set the same `spec.image.ref` and retain
+`pullPolicy: never`. Release manifests default to `pullPolicy: always`.
 
 Prepare the per-user state and inspect the machine:
 
@@ -136,18 +147,28 @@ cohotfs onboard
 cohotfs doctor
 ```
 
-Initialize a repository:
+Initialize a repository and add its setup script:
 
 ```console
 cd ~/src/my-project
 cohotfs init
+cat > .cohotfs/setup.sh <<'EOF'
+#!/bin/sh
+set -eu
+test -d /workspace
+printf 'workspace ready\n'
+EOF
+chmod 0755 .cohotfs/setup.sh
 ```
 
 This creates `.cohotfs/workspace.yaml` and a machine-local override below
-`~/.cohotfs/projects/`. Review the generated image, setup, resource, and
-integration policy. The default setup command points to
-`.cohotfs/setup.sh`; add that repository-owned script before the first create, or
-change the command to another real script in the repository.
+`~/.cohotfs/projects/`. The example setup is an intentionally small smoke check;
+replace it with the project's real dependency/bootstrap work. Review the
+generated image, setup, resource, and integration policy before first use.
+
+Bootstrap PID 1 remains container root, but setup commands, SSH shells, and
+`cohotfs exec` run with the host-mapped `agent` UID/GID. Setup is still trusted
+repository code: it can modify the writable project mount by design.
 
 Then enter:
 
@@ -226,6 +247,7 @@ make build
 make test
 make vet
 make windows-bridge
+./images/workspace-base/build-local-image.sh
 ```
 
 The live Docker suite creates real containers and images, exercises SSH/SCP/SFTP,

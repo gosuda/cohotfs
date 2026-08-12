@@ -141,6 +141,7 @@ func writeRecoveryReport(cmd *cobra.Command, report workspaceservice.ReconcileRe
 
 type preparedWorkspace struct {
 	workspace       config.Workspace
+	projectRoot     string
 	source          string
 	maskCohotfsRoot bool
 	digest          string
@@ -161,15 +162,16 @@ func prepareWorkspaceDirectory(root *hostroot.Root, cwd string, host config.Host
 		if err != nil {
 			return preparedWorkspace{}, err
 		}
-		workspace, err = config.ResolveWorkspace(manifestPath, overridePath, host, config.WorkspaceFlags{}, "ghcr.io/gosuda/cohotfs/workspace-base:"+Version)
+		workspace, err = config.ResolveWorkspace(manifestPath, overridePath, host, config.WorkspaceFlags{}, defaultImageReference())
 		if err != nil {
 			return preparedWorkspace{}, apperr.Wrap(apperr.ExitUsage, "manifest", err, "resolve workspace: %v", err)
 		}
 	case errors.Is(readErr, os.ErrNotExist):
-		workspace, err = config.ResolveDefaultWorkspace(workspaceNameForPath(canonical), host, config.WorkspaceFlags{}, "ghcr.io/gosuda/cohotfs/workspace-base:"+Version)
+		workspace, err = config.ResolveDefaultWorkspace(workspaceNameForPath(canonical), host, config.WorkspaceFlags{}, defaultImageReference())
 		if err != nil {
 			return preparedWorkspace{}, apperr.Wrap(apperr.ExitUsage, "workspace", err, "resolve default workspace: %v", err)
 		}
+		workspace.Spec.Image.PullPolicy = defaultImagePullPolicy()
 		workspace.Spec.Setup.Mode = "manual"
 	default:
 		return preparedWorkspace{}, apperr.Wrap(apperr.ExitUsage, "manifest", readErr, "read workspace manifest: %v", readErr)
@@ -189,7 +191,7 @@ func prepareWorkspaceDirectory(root *hostroot.Root, cwd string, host config.Host
 	if err != nil {
 		return preparedWorkspace{}, err
 	}
-	return preparedWorkspace{workspace: workspace, source: source, digest: workspaceservice.ManifestDigest(effectiveRaw)}, nil
+	return preparedWorkspace{workspace: workspace, projectRoot: canonical, source: source, digest: workspaceservice.ManifestDigest(effectiveRaw)}, nil
 }
 
 func workspaceNameForPath(canonical string) string {
@@ -206,9 +208,24 @@ func createPreparedWorkspace(ctx context.Context, root *hostroot.Root, backend *
 	if err != nil {
 		return state.Workspace{}, apperr.Wrap(apperr.ExitUnavailable, "docker", err, "Docker is unavailable: %v", err)
 	}
-	image, err := backend.Pull(ctx, runtimePullRequest(prepared.workspace.Spec.Image.Ref))
-	if err != nil {
-		return state.Workspace{}, apperr.Wrap(apperr.ExitRuntime, "image_pull", err, "pull image: %v", err)
+	if prepared.workspace.Spec.Image.Build != nil {
+		return state.Workspace{}, apperr.New(apperr.ExitUnavailable, "image_build_create", "workspace creation from spec.image.build is not supported; run cohotfs image build, then set spec.image.ref to the resulting local tag with pullPolicy: never")
+	}
+	var image runtime.ResolvedImage
+	imageRequest := runtimePullRequest(prepared.workspace.Spec.Image.Ref)
+	switch prepared.workspace.Spec.Image.PullPolicy {
+	case config.ImagePullNever:
+		image, err = backend.ResolveLocal(ctx, imageRequest)
+		if err != nil {
+			return state.Workspace{}, apperr.Wrap(apperr.ExitUnavailable, "image_local", err, "resolve local image %s: %v; build it or change spec.image.pullPolicy", prepared.workspace.Spec.Image.Ref, err)
+		}
+	case config.ImagePullAlways:
+		image, err = backend.Pull(ctx, imageRequest)
+		if err != nil {
+			return state.Workspace{}, apperr.Wrap(apperr.ExitRuntime, "image_pull", err, "pull image: %v", err)
+		}
+	default:
+		return state.Workspace{}, apperr.New(apperr.ExitUsage, "image_pull_policy", "unsupported image pull policy %q", prepared.workspace.Spec.Image.PullPolicy)
 	}
 	image, err = backend.CheckCompatibility(ctx, image)
 	if err != nil {

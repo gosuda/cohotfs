@@ -90,15 +90,8 @@ func (a *Adapter) Probe(ctx context.Context) (runtime.BackendInfo, error) {
 }
 
 func (a *Adapter) Pull(ctx context.Context, request runtime.PullRequest) (runtime.ResolvedImage, error) {
-	if request.Reference == "" {
-		return runtime.ResolvedImage{}, fmt.Errorf("image reference is required")
-	}
-	platform := request.Platform
-	if platform == "" {
-		platform = defaultPlatform
-	}
-	if platform != defaultPlatform {
-		return runtime.ResolvedImage{}, &runtime.UnsupportedError{Backend: "docker", Capability: runtime.Capability("platform"), Reason: "only linux/amd64 is supported"}
+	if err := validateImageRequest(request); err != nil {
+		return runtime.ResolvedImage{}, err
 	}
 	response, err := a.client.ImagePull(ctx, request.Reference, client.ImagePullOptions{Platforms: []ocispec.Platform{{OS: "linux", Architecture: "amd64"}}})
 	if err != nil {
@@ -109,6 +102,29 @@ func (a *Adapter) Pull(ctx context.Context, request runtime.PullRequest) (runtim
 		return runtime.ResolvedImage{}, err
 	}
 	return a.resolveImage(ctx, request.Reference)
+}
+
+// ResolveLocal resolves an image already present in the selected Docker Engine
+// without contacting a registry.
+func (a *Adapter) ResolveLocal(ctx context.Context, request runtime.PullRequest) (runtime.ResolvedImage, error) {
+	if err := validateImageRequest(request); err != nil {
+		return runtime.ResolvedImage{}, err
+	}
+	return a.resolveImage(ctx, request.Reference)
+}
+
+func validateImageRequest(request runtime.PullRequest) error {
+	if request.Reference == "" {
+		return fmt.Errorf("image reference is required")
+	}
+	platform := request.Platform
+	if platform == "" {
+		platform = defaultPlatform
+	}
+	if platform != defaultPlatform {
+		return &runtime.UnsupportedError{Backend: "docker", Capability: runtime.Capability("platform"), Reason: "only linux/amd64 is supported"}
+	}
+	return nil
 }
 
 func consumePullEvents(reader io.Reader) error {

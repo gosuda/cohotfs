@@ -22,6 +22,17 @@ import (
 
 var Version = "dev"
 
+func defaultImageReference() string {
+	return "ghcr.io/gosuda/cohotfs/workspace-base:" + Version
+}
+
+func defaultImagePullPolicy() string {
+	if Version == "dev" {
+		return config.ImagePullNever
+	}
+	return config.ImagePullAlways
+}
+
 type Dependencies struct {
 	OpenRoot func() (*hostroot.Root, error)
 }
@@ -192,7 +203,8 @@ func newInitCommand(deps Dependencies) *cobra.Command {
 			if name == "" {
 				name = "workspace"
 			}
-			workspace := config.BuiltinWorkspace(name, "ghcr.io/gosuda/cohotfs/workspace-base:"+Version)
+			workspace := config.BuiltinWorkspace(name, defaultImageReference())
+			workspace.Spec.Image.PullPolicy = defaultImagePullPolicy()
 			data, err := config.Render(workspace)
 			if err != nil {
 				return err

@@ -10,9 +10,11 @@ import (
 )
 
 const (
-	APIVersion     = "cohotfs.io/v1alpha1"
-	WorkspaceKind  = "Workspace"
-	HostConfigKind = "HostConfig"
+	APIVersion      = "cohotfs.io/v1alpha1"
+	WorkspaceKind   = "Workspace"
+	HostConfigKind  = "HostConfig"
+	ImagePullAlways = "always"
+	ImagePullNever  = "never"
 )
 
 var workspaceNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
@@ -40,7 +42,6 @@ type DockerHostConfig struct {
 	Endpoint      string `yaml:"endpoint" json:"endpoint"`
 	GVisorRuntime string `yaml:"gvisorRuntime" json:"gvisorRuntime"`
 }
-
 
 type HostBrowserConfig struct {
 	LinuxExecutable   string `yaml:"linuxExecutable" json:"linuxExecutable"`
@@ -88,8 +89,9 @@ type RuntimeSpec struct {
 }
 
 type ImageSpec struct {
-	Ref   string     `yaml:"ref,omitempty" json:"ref,omitempty"`
-	Build *BuildSpec `yaml:"build,omitempty" json:"build,omitempty"`
+	Ref        string     `yaml:"ref,omitempty" json:"ref,omitempty"`
+	PullPolicy string     `yaml:"pullPolicy" json:"pullPolicy"`
+	Build      *BuildSpec `yaml:"build,omitempty" json:"build,omitempty"`
 }
 
 type BuildSpec struct {
@@ -196,7 +198,7 @@ func BuiltinWorkspace(name, imageRef string) Workspace {
 		Metadata: Metadata{Name: name},
 		Spec: WorkspaceSpec{
 			Runtime:   RuntimeSpec{Backend: "docker", Isolation: "standard"},
-			Image:     ImageSpec{Ref: imageRef},
+			Image:     ImageSpec{Ref: imageRef, PullPolicy: ImagePullAlways},
 			Workspace: SourceSpec{Source: ".", Target: "/workspace"},
 			Setup:     SetupSpec{Mode: "once", Command: []string{"/bin/sh", ".cohotfs/setup.sh"}, Timeout: 15 * time.Minute},
 			Resources: ResourceSpec{CPU: 2, Memory: 4 << 30, MemorySwap: 5 << 30, PIDs: 512, Nofile: NofileLimit{Soft: 1024, Hard: 4096}},
@@ -224,6 +226,9 @@ func (w Workspace) Validate() error {
 	}
 	if (w.Spec.Image.Ref == "") == (w.Spec.Image.Build == nil) {
 		return fmt.Errorf("exactly one of spec.image.ref and spec.image.build is required")
+	}
+	if w.Spec.Image.PullPolicy != ImagePullAlways && w.Spec.Image.PullPolicy != ImagePullNever {
+		return fmt.Errorf("spec.image.pullPolicy must be always or never")
 	}
 	if w.Spec.Workspace.Source == "" || w.Spec.Workspace.Target == "" || w.Spec.Workspace.Target[0] != '/' {
 		return fmt.Errorf("spec.workspace requires source and absolute target")

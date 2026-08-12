@@ -33,6 +33,11 @@ func TestWorkspaceValidationFailsClosed(t *testing.T) {
 		t.Fatal("accepted both image ref and build")
 	}
 	workspace = BuiltinWorkspace("safe", "example.invalid/workspace:dev")
+	workspace.Spec.Image.PullPolicy = "sometimes"
+	if err := workspace.Validate(); err == nil {
+		t.Fatal("accepted unknown image pull policy")
+	}
+	workspace = BuiltinWorkspace("safe", "example.invalid/workspace:dev")
 	workspace.Spec.Resources.Enabled = true
 	workspace.Spec.Resources.MemorySwap = workspace.Spec.Resources.Memory - 1
 	if err := workspace.Validate(); err == nil {

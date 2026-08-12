@@ -95,6 +95,7 @@ spec:
     isolation: standard             # standard | gvisor
   image:
     ref: ghcr.io/gosuda/cohotfs/workspace-base:<cohotfs-version>
+    pullPolicy: always              # always | never; never resolves an already-loaded local image
     # build is mutually exclusive with ref:
     # build:
     #   context: .
@@ -152,7 +153,7 @@ spec:
         config: seed
 ```
 
-`image.ref` and `image.build` are mutually exclusive. Relative project paths resolve beneath the manifest directory and may not escape it. Runtime endpoint paths, browser executable paths, host toolchain paths, credential providers, and secret values are forbidden in the project manifest; their exact candidates belong in `~/.cohotfs/config.yaml` and must remain inside its permitted roots. Per-project machine-local overrides live under `~/.cohotfs/projects/`, so `cohotfs init` does not edit `.gitignore`, `.git/info/exclude`, or any other repository file beyond the requested `.cohotfs/workspace.yaml`.
+`image.ref` and `image.build` are mutually exclusive. `image.pullPolicy` is `always` for release references; `never` performs an exact local Engine image inspection without registry access and fails unavailable when the image is absent. Source-build `dev` manifests select `never` explicitly. Relative project paths resolve beneath the manifest directory and may not escape it. Runtime endpoint paths, browser executable paths, host toolchain paths, credential providers, and secret values are forbidden in the project manifest; their exact candidates belong in `~/.cohotfs/config.yaml` and must remain inside its permitted roots. Per-project machine-local overrides live under `~/.cohotfs/projects/`, so `cohotfs init` does not edit `.gitignore`, `.git/info/exclude`, or any other repository file beyond the requested `.cohotfs/workspace.yaml`.
 
 A workspace has a random immutable 128-bit base32 ID and an owner-unique display name matching `[a-z0-9][a-z0-9._-]{0,62}`. Persist schema version, owner UID/GID, canonical source, manifest digest, backend and opaque runtime IDs, negotiated capabilities, image digest, container UID/GID, mount manifest, SSH host-key fingerprint, setup digest/result, integration grants, status, and timestamps. Persist no token, private key, credential-helper output, CDP WebSocket URL, or agent auth database. Lifecycle states are `creating`, `starting`, `setup`, `ready`, `setup_failed`, `stopping`, `stopped`, `removing`, and `error`; every created backend resource is recorded before the next operation so reconciliation can clean partial failures.
 
