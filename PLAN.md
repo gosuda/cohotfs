@@ -22,7 +22,7 @@ Before adding source, copy this approved execution spec verbatim to repository-r
 
 ### Configuration and state
 
-Use strict YAML with unknown-key rejection. Parse `apiVersion` and `kind` first; support only `apiVersion: cohotfs.io/v1alpha1` and `kind: Workspace` until an explicit migration is implemented. Precedence is command flags over `~/.cohotfs/projects/<source-hash>/override.yaml`, repository `.cohotfs/workspace.yaml`, `~/.cohotfs/config.yaml` defaults, then built-ins. Host-local runtime endpoints, permitted external roots, Chrome paths, and credential variable mappings live in `~/.cohotfs/config.yaml`; project configuration cannot expand those grants. `<source-hash>` is the first 32 lowercase hex characters of SHA-256 over the canonical source path, and the override stores/validates the full path and digest to reject collisions.
+Use strict YAML with unknown-key rejection. Parse `apiVersion` and `kind` first; support only `apiVersion: cohotfs.io/v1alpha1` and `kind: Workspace` until an explicit migration is implemented. Precedence is command flags over `~/.cohotfs/projects/<source-hash>/workspace.yaml`, `~/.cohotfs/config.yaml` defaults, then built-ins. Host-local runtime endpoints, permitted external roots, Chrome paths, and credential variable mappings live in `~/.cohotfs/config.yaml`; project configuration cannot expand those grants. `<source-hash>` is the first 32 lowercase hex characters of SHA-256 over the canonical source path, and the project document stores and validates the full path and digest to reject collisions.
 
 The local root layout is fixed; tests inject a temporary root through internal constructors rather than exposing a production relocation option:
 
@@ -30,7 +30,7 @@ The local root layout is fixed; tests inject a temporary root through internal c
 ~/.cohotfs/
   bin/                              # optional local release binaries/Windows companion
   config.yaml                       # user host/runtime/integration policy
-  projects/<source-hash>/override.yaml
+  projects/<source-hash>/workspace.yaml
   state/workspaces/<id>/            # workspace JSON, operation journal, grants
   state/images/                     # resolved image/build metadata
   workspaces/<id>/home/             # private container home backing state
@@ -82,7 +82,7 @@ credentials:
 
 Onboarding fills executable/toolchain candidates only after canonical-path and version checks. Each `agentEnvironment` map is `DESTINATION_NAME: HOST_SOURCE_NAME`; destination names must come from that agent descriptor’s fixed allowlist. Docker `auto` honors the current Docker context/`DOCKER_HOST` only when it resolves to a local Unix endpoint; TLS/TCP and SSH endpoints are reported unsupported in v0.1 because client-local source, socket, and `~/.cohotfs` bind mounts cannot be guaranteed. Containerd/CRI/BuildKit endpoints remain dormant until their milestone and must be local Unix sockets.
 
-The repository manifest has this exact shape; omitted integration blocks retain fail-closed defaults:
+The machine-local project policy has this exact shape; omitted integration blocks retain fail-closed defaults:
 
 ```yaml
 apiVersion: cohotfs.io/v1alpha1
@@ -99,15 +99,15 @@ spec:
     # build is mutually exclusive with ref:
     # build:
     #   context: .
-    #   containerfile: .cohotfs/Containerfile
+    #   containerfile: Containerfile
     #   target: ""
     #   args: {}
   workspace:
     source: .
     target: /workspace
   setup:
-    mode: once                       # once | always | manual
-    command: ["/bin/sh", ".cohotfs/setup.sh"]
+    mode: manual                     # once | always | manual
+    command: ["/bin/true"]
     timeout: 15m
   resources:
     enabled: false                    # false means pass no Cohotfs CPU/memory/PID/ulimit constraints
@@ -145,6 +145,13 @@ spec:
       omp:
         enabled: false
         config: seed
+        import:
+          enabled: true
+          binary: true
+          natives: true
+          models: true
+          config: true
+          requireCow: false
       codex:
         enabled: false
         config: seed
@@ -153,7 +160,7 @@ spec:
         config: seed
 ```
 
-`image.ref` and `image.build` are mutually exclusive. `image.pullPolicy` is `always` for release references; `never` performs an exact local Engine image inspection without registry access and fails unavailable when the image is absent. Source-build `dev` manifests select `never` explicitly. Relative project paths resolve beneath the manifest directory and may not escape it. Runtime endpoint paths, browser executable paths, host toolchain paths, credential providers, and secret values are forbidden in the project manifest; their exact candidates belong in `~/.cohotfs/config.yaml` and must remain inside its permitted roots. Per-project machine-local overrides live under `~/.cohotfs/projects/`, so `cohotfs init` does not edit `.gitignore`, `.git/info/exclude`, or any other repository file beyond the requested `.cohotfs/workspace.yaml`.
+`image.ref` and `image.build` are mutually exclusive. `image.pullPolicy` is `always` for release references; `never` performs an exact local Engine image inspection without registry access and fails unavailable when the image is absent. Source-build `dev` policies select `never` explicitly. Relative project paths resolve beneath the canonical source directory and may not escape it. Runtime endpoint paths, browser executable paths, host toolchain paths, credential providers, and secret values are forbidden in the project policy; their exact candidates belong in `~/.cohotfs/config.yaml` and must remain inside its permitted roots. Per-project machine-local policies live under `~/.cohotfs/projects/`, so `cohotfs init` does not edit `.gitignore`, `.git/info/exclude`, or any other repository file.
 
 A workspace has a random immutable 128-bit base32 ID and an owner-unique display name matching `[a-z0-9][a-z0-9._-]{0,62}`. Persist schema version, owner UID/GID, canonical source, manifest digest, backend and opaque runtime IDs, negotiated capabilities, image digest, container UID/GID, mount manifest, SSH host-key fingerprint, setup digest/result, integration grants, status, and timestamps. Persist no token, private key, credential-helper output, CDP WebSocket URL, or agent auth database. Lifecycle states are `creating`, `starting`, `setup`, `ready`, `setup_failed`, `stopping`, `stopped`, `removing`, and `error`; every created backend resource is recorded before the next operation so reconciliation can clean partial failures.
 
@@ -288,7 +295,7 @@ Every discovery/status/list command supports `--output json` with stable field n
 - Add `cohotfs host serve` only for persistent Chrome, Git/CDP broker, and `fuse-overlayfs` leases. Spawn it with fixed argv and sanitized environment, wait for `~/.cohotfs/run/host.sock`, record PID plus Linux process start time, and reuse it only when UID, executable identity, protocol version, and root match. `host stop` refuses while leases remain unless `--yes`, then drains leases and performs identity-checked cleanup.
 - On every CLI start, reconcile nonterminal workspaces and recorded child PIDs before mutation: compare runtime labels/nonce, PID start time, socket inode/type/owner, and `/proc/self/mountinfo`; unmount/remove only exact records and quarantine ambiguity. Never glob-delete under `run/`, kill by stale PID alone, or remove an unrecognized runtime object.
 - Write redacted audit/events to `~/.cohotfs/logs/` with bounded rotation. Record operation, workspace, external resource type, and result; never record environment values, Git helper payloads, SSH bytes, CDP frames, build secret contents, or agent tokens.
-- Release archives contain `cohotfs`, `cohotfs-agent`, and the Windows companion. `cohotfs onboard` copies version-matched helpers into `~/.cohotfs/bin/` atomically and records their SHA-256 values before runtime use. It never invokes sudo, installs a system unit, edits runtime configuration, or writes outside `~/.cohotfs` and the explicitly requested repository manifest.
+- Release archives contain `cohotfs`, `cohotfs-agent`, and the Windows companion. `cohotfs onboard` copies version-matched helpers into `~/.cohotfs/bin/` atomically and records their SHA-256 values before runtime use. It never invokes sudo, installs a system unit, edits runtime configuration, or writes outside `~/.cohotfs`.
 
 ### 3. Build the image and bootstrap contract
 
@@ -337,7 +344,7 @@ Every discovery/status/list command supports `--output json` with stable field n
 ### 9. Complete onboarding and operator recovery
 
 - `cohotfs onboard` creates/validates `~/.cohotfs`, checks current-user access to Docker and later runtime endpoints, gVisor aliases, OpenSSH, Linux/Windows Chrome, WSL interop, unprivileged OverlayFS/`fuse-overlayfs`, Go/Rust, live SSH agent, Git credential provider availability without requesting a secret, and OMP/Codex/Claude candidates. Interactive mode writes only selected non-secret values to `~/.cohotfs/config.yaml`; non-interactive mode reports without mutation.
-- `cohotfs init` writes repository `.cohotfs/workspace.yaml` only when absent, writes machine-local overrides under `~/.cohotfs/projects/<source-hash>/`, and never enables credentials/browser/toolchains. It validates the manifest and prints the exact `workspace create` command.
+- `cohotfs init` writes the complete machine-local project policy under `~/.cohotfs/projects/<source-hash>/workspace.yaml` only when absent, never changes the repository, and never enables credentials/browser/toolchains/agents. It validates the policy and prints the exact `workspace create` command.
 - `doctor` performs no mutation. It emits pass/warn/fail plus remediation for `~/.cohotfs` ownership/modes/space, runtime socket access, filesystem/overlay support, build/network/mount support, WSL placement (`/mnt/*` warns; COW backing there fails), image compatibility, SSH transport, Chrome, credentials, agent discovery, stale state, and version skew.
 - `workspace recover` operates on one workspace ID, shows exact matching/quarantined resources, and requires `--yes` to remove identity-matched resources. It never glob-deletes sockets/mounts/containers. `host stop` and binary removal refuse while recorded workspaces/mounts remain and point to recovery.
 
@@ -383,7 +390,7 @@ Agent integration fixtures cover default and overridden/profile/XDG locations fo
 
 Containerd verification runs the same portable lifecycle/SSH/setup suite plus CNI teardown and snapshot cleanup. CRI verification runs it against both containerd CRI and CRI-O with `ExecSync`, then asserts image build and interactive runtime exec report `ErrUnsupported`; a BuildKit-to-registry workflow must make the built digest pullable. For every backend, request `isolation: gvisor` once with a configured handler and observe the selected runtime inside the workload; repeat without the handler and require pre-create failure with no standard-runtime container.
 
-Final smoke proof starts from a clean supported Linux user whose Docker access is already configured: extract the release into a user-selected executable directory, run `onboard`, `init`, `workspace create`, `workspace start`, `shell`, one agent command, stop/remove, `host stop`, and remove the release. Repeat in WSL2 with a project on the Linux filesystem and native Windows Chrome. Snapshot the host before/after and require every Cohotfs-created regular file, directory, socket, log, key, profile, and mount backing path to be beneath `~/.cohotfs` (plus the explicitly requested repository manifest); `doctor --output json` must report no stale external runtime object, mount, socket, Chrome process/profile, or secret-bearing state.
+Final smoke proof starts from a clean supported Linux user whose Docker access is already configured: extract the release into a user-selected executable directory, run `onboard`, `init`, `workspace create`, `workspace start`, `shell`, one agent command, stop/remove, `host stop`, and remove the release. Repeat in WSL2 with a project on the Linux filesystem and native Windows Chrome. Snapshot the host before/after and require every Cohotfs-created regular file, directory, socket, log, key, profile, and mount backing path to be beneath `~/.cohotfs`; `doctor --output json` must report no stale external runtime object, mount, socket, Chrome process/profile, or secret-bearing state.
 
 ## Assumptions and contingencies
 

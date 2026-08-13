@@ -35,3 +35,6 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Cohotfs machine-local project policy
+/.cohotfs/
