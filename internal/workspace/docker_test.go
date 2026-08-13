@@ -219,19 +219,19 @@ func TestDockerServiceCreateStartStopRemove(t *testing.T) {
 	if record.Status != state.StatusStopped || record.RuntimeRef.IDs["container"] != "container" || backend.created.Labels[LabelCreationNonce] == "" || record.BootstrapAPI != containeragent.BootstrapAPI || record.TCPForwarding {
 		t.Fatalf("created record=%#v request=%#v", record, backend.created)
 	}
-	var foundCohotfsMask, foundHome, foundSystem bool
+	var foundReservedMask, foundHome, foundSystem bool
 	for _, mounted := range backend.created.Mounts {
 		switch mounted.Target {
-		case "/workspace/.cohotfs":
-			foundCohotfsMask = mounted.Type == "tmpfs" && mounted.Source == "" && mounted.ReadOnly
+		case "/workspace/.cohotfs", "/workspace/.omp":
+			foundReservedMask = true
 		case "/home/agent":
 			foundHome = mounted.Source == filepath.Join(root.Path(), "workspaces", record.ID, "home") && mounted.Type == "bind" && mounted.Propagation == "rprivate" && !mounted.ReadOnly
 		case "/var/lib/cohotfs/system":
 			foundSystem = mounted.Source == filepath.Join(root.Path(), "workspaces", record.ID, "system") && mounted.Type == "bind" && mounted.Propagation == "rprivate" && !mounted.ReadOnly
 		}
 	}
-	if !foundCohotfsMask || !foundHome || !foundSystem {
-		t.Fatalf("persistent or mask mounts missing: %#v", backend.created.Mounts)
+	if foundReservedMask || !foundHome || !foundSystem {
+		t.Fatalf("unexpected reserved mask or missing persistent mount: %#v", backend.created.Mounts)
 	}
 	for _, name := range []string{"home", "system"} {
 		info, err := os.Stat(filepath.Join(root.Path(), "workspaces", record.ID, name))

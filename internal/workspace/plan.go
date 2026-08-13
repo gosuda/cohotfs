@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -84,11 +85,14 @@ func CompilePlan(workspace config.Workspace, workspaceID string, ownerUID, owner
 		},
 		IntegrationSettings: workspace.Spec.Integrations,
 	}
-	plan.Mounts = append(plan.Mounts,
-		runtime.Mount{Source: canonicalSource, Target: workspace.Spec.Workspace.Target, Type: "bind", Propagation: "rprivate"},
-		runtime.Mount{Target: filepath.Join(workspace.Spec.Workspace.Target, ".cohotfs"), ReadOnly: true, Type: "tmpfs"},
-		runtime.Mount{Target: filepath.Join(workspace.Spec.Workspace.Target, ".omp"), ReadOnly: true, Type: "tmpfs"},
-	)
+	plan.Mounts = append(plan.Mounts, runtime.Mount{
+		Source: canonicalSource, Target: workspace.Spec.Workspace.Target, Type: "bind", Propagation: "rprivate",
+	})
+	reservedMounts, err := reservedWorkspaceMaskMounts(canonicalSource, workspace.Spec.Workspace.Target)
+	if err != nil {
+		return Plan{}, err
+	}
+	plan.Mounts = append(plan.Mounts, reservedMounts...)
 	plan.Environment = []string{"HOME=/home/agent", "XDG_CONFIG_HOME=/home/agent/.config", "XDG_CACHE_HOME=/home/agent/.cache", "XDG_DATA_HOME=/home/agent/.local/share", "TMPDIR=/home/agent/.tmp", "TERM=xterm-256color", "COLORTERM=truecolor"}
 	if workspace.Spec.Integrations.Browser.Enabled {
 		plan.Environment = append(plan.Environment, "COHOTFS_CDP_URL=http://127.0.0.1:9222")
@@ -119,6 +123,65 @@ func CompilePlan(workspace config.Workspace, workspaceID string, ownerUID, owner
 		}
 	}
 	return plan, nil
+}
+
+func reservedWorkspaceMaskMounts(source, target string) ([]runtime.Mount, error) {
+	mounts := make([]runtime.Mount, 0, 2)
+	for _, name := range []string{".cohotfs", ".omp"} {
+		path := filepath.Join(source, name)
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("inspect reserved workspace path %s: %w", path, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return nil, fmt.Errorf("reserved workspace path %s must be a non-symlink directory", path)
+		}
+		mounts = append(mounts, runtime.Mount{
+			Target: filepath.Join(target, name), ReadOnly: true, Type: "tmpfs",
+		})
+	}
+	return mounts, nil
+}
+
+func validateReservedWorkspaceMasks(plan Plan) error {
+	workspaceTarget := ""
+	for _, mounted := range plan.Mounts {
+		if mounted.Type == "bind" && mounted.Source == plan.CanonicalSource {
+			workspaceTarget = mounted.Target
+			break
+		}
+	}
+	if workspaceTarget == "" {
+		return fmt.Errorf("workspace source mount is unavailable")
+	}
+	for _, name := range []string{".cohotfs", ".omp"} {
+		expected := false
+		target := filepath.Join(workspaceTarget, name)
+		for _, mounted := range plan.Mounts {
+			if mounted.Target == target {
+				expected = mounted.Type == "tmpfs" && mounted.Source == "" && mounted.ReadOnly
+				if !expected {
+					return fmt.Errorf("reserved workspace path %s has an invalid mask", name)
+				}
+				break
+			}
+		}
+		info, err := os.Lstat(filepath.Join(plan.CanonicalSource, name))
+		present := err == nil
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect reserved workspace path %s: %w", name, err)
+		}
+		if present && (info.Mode()&os.ModeSymlink != 0 || !info.IsDir()) {
+			return fmt.Errorf("reserved workspace path %s must remain a non-symlink directory", name)
+		}
+		if present != expected {
+			return fmt.Errorf("reserved workspace path %s changed after plan compilation; recreate the workspace", name)
+		}
+	}
+	return nil
 }
 
 func resolveGVisorRuntimeAlias(configured string, backend runtime.BackendInfo) (string, error) {

@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -36,6 +37,101 @@ func TestCompilePlanDefaultsAndResources(t *testing.T) {
 	}
 	if !plan.Resources.Enabled || plan.Resources.NanoCPUs != 8_000_000_000 || plan.Resources.MemoryBytes != 32<<30 || plan.Resources.MemorySwapBytes != 64<<30 || plan.Resources.PIDs != 4096 || plan.SSH.Kind != "directory-uds" {
 		t.Fatalf("resource plan = %#v", plan)
+	}
+}
+
+func TestCompilePlanDoesNotCreateAbsentReservedPaths(t *testing.T) {
+	source := t.TempDir()
+	workspace := config.BuiltinWorkspace("api", "example.invalid/base:dev")
+	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI}
+	plan, err := CompilePlan(workspace, "workspace", 1000, 1000, source, "manifest", image, "", "/tmp/ssh.sock", availableDocker())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{".cohotfs", ".omp"} {
+		if _, err := os.Lstat(filepath.Join(source, name)); !os.IsNotExist(err) {
+			t.Fatalf("compile created reserved source path %s: %v", name, err)
+		}
+		target := filepath.Join("/workspace", name)
+		for _, mounted := range plan.Mounts {
+			if mounted.Target == target {
+				t.Fatalf("absent reserved path received a mount: %#v", mounted)
+			}
+		}
+	}
+}
+
+func TestCompilePlanMasksExistingReservedDirectories(t *testing.T) {
+	source := t.TempDir()
+	for _, name := range []string{".cohotfs", ".omp"} {
+		if err := os.Mkdir(filepath.Join(source, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	workspace := config.BuiltinWorkspace("api", "example.invalid/base:dev")
+	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI}
+	plan, err := CompilePlan(workspace, "workspace", 1000, 1000, source, "manifest", image, "", "/tmp/ssh.sock", availableDocker())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{".cohotfs", ".omp"} {
+		target := filepath.Join("/workspace", name)
+		found := false
+		for _, mounted := range plan.Mounts {
+			if mounted.Target == target {
+				found = mounted.Type == "tmpfs" && mounted.Source == "" && mounted.ReadOnly
+			}
+		}
+		if !found {
+			t.Fatalf("existing reserved directory %s is not masked: %#v", name, plan.Mounts)
+		}
+	}
+}
+
+func TestCompilePlanRejectsUnsafeReservedPath(t *testing.T) {
+	source := t.TempDir()
+	if err := os.Symlink(t.TempDir(), filepath.Join(source, ".omp")); err != nil {
+		t.Fatal(err)
+	}
+	workspace := config.BuiltinWorkspace("api", "example.invalid/base:dev")
+	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI}
+	if _, err := CompilePlan(workspace, "workspace", 1000, 1000, source, "manifest", image, "", "/tmp/ssh.sock", availableDocker()); err == nil || !strings.Contains(err.Error(), "non-symlink directory") {
+		t.Fatalf("unsafe reserved path error = %v", err)
+	}
+}
+
+func TestValidateReservedWorkspaceMasksRejectsSourceChanges(t *testing.T) {
+	source := t.TempDir()
+	workspace := config.BuiltinWorkspace("api", "example.invalid/base:dev")
+	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI}
+	plan, err := CompilePlan(workspace, "workspace", 1000, 1000, source, "manifest", image, "", "/tmp/ssh.sock", availableDocker())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateReservedWorkspaceMasks(plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(source, ".omp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateReservedWorkspaceMasks(plan); err == nil || !strings.Contains(err.Error(), "changed after plan compilation") {
+		t.Fatalf("new reserved path validation error = %v", err)
+	}
+	if err := os.Remove(filepath.Join(source, ".omp")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(source, ".cohotfs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	plan, err = CompilePlan(workspace, "workspace", 1000, 1000, source, "manifest", image, "", "/tmp/ssh.sock", availableDocker())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(source, ".cohotfs")); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateReservedWorkspaceMasks(plan); err == nil || !strings.Contains(err.Error(), "changed after plan compilation") {
+		t.Fatalf("removed reserved path validation error = %v", err)
 	}
 }
 

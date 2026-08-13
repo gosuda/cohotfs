@@ -688,6 +688,9 @@ func (s *DockerService) startLocked(ctx context.Context, record state.Workspace)
 	if err != nil {
 		return record, err
 	}
+	if err := validateReservedWorkspaceMasks(plan); err != nil {
+		return record, err
+	}
 	if err := s.acquireIntegrationLeases(ctx, &record, plan); err != nil {
 		return record, fmt.Errorf("acquire host integrations: %w", err)
 	}

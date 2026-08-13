@@ -169,8 +169,10 @@ repository files. The terminal editor handles integration toggles. Use
 strict YAML document, including setup argv and resource limits. The generated
 policy uses manual no-op setup. If setup should run repository code, put it at a
 path such as `scripts/cohotfs-setup.sh` and explicitly set
-`spec.setup.command`; repository `.cohotfs` and `.omp` paths are masked inside
-the workspace and cannot host setup scripts.
+`spec.setup.command`; existing repository `.cohotfs` and `.omp` directories are
+masked inside the workspace and cannot host setup scripts. Cohotfs never creates
+those reserved directories in the project; all Cohotfs and imported OMP state is
+stored under the user's home directory.
 
 Bootstrap PID 1 remains container root, but setup commands, SSH shells, and
 `cohotfs exec` run with the host-mapped `agent` UID/GID. Setup is still trusted
