@@ -6,7 +6,9 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -84,7 +86,7 @@ func EnsureAgentIdentity(bootstrap Bootstrap) error {
 		}
 	}
 	if !userExists {
-		if output, err := exec.Command("/usr/sbin/useradd", "--uid", strconv.Itoa(bootstrap.OwnerUID), "--gid", strconv.Itoa(bootstrap.OwnerGID), "--home-dir", "/home/agent", "--create-home", "--shell", "/bin/sh", "agent").CombinedOutput(); err != nil {
+		if output, err := exec.Command("/usr/sbin/useradd", "--uid", strconv.Itoa(bootstrap.OwnerUID), "--gid", strconv.Itoa(bootstrap.OwnerGID), "--home-dir", "/home/agent", "--create-home", "--shell", "/bin/bash", "agent").CombinedOutput(); err != nil {
 			return fmt.Errorf("create agent user: %w: %s", err, strings.TrimSpace(string(output)))
 		}
 	}
@@ -92,19 +94,228 @@ func EnsureAgentIdentity(bootstrap Bootstrap) error {
 	if err != nil {
 		return fmt.Errorf("disable agent password: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	if err := os.MkdirAll("/home/agent", 0o700); err != nil {
+	homeFD, err := ensureAgentHome("/home", "agent", bootstrap.OwnerUID, bootstrap.OwnerGID)
+	if err != nil {
 		return err
 	}
-	if err := os.Chown("/home/agent", bootstrap.OwnerUID, bootstrap.OwnerGID); err != nil {
+	defer unix.Close(homeFD)
+	return installShellProfileAt(homeFD, bootstrap.OwnerUID, bootstrap.OwnerGID)
+}
+
+func ensureAgentHome(parent, name string, uid, gid int) (int, error) {
+	parentFD, err := unix.Open(parent, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, err
+	}
+	defer unix.Close(parentFD)
+	if err := unix.Mkdirat(parentFD, name, 0o700); err != nil && !errors.Is(err, unix.EEXIST) {
+		return -1, err
+	}
+	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, err
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		_ = unix.Close(fd)
+		return -1, err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
+		_ = unix.Close(fd)
+		return -1, fmt.Errorf("agent home is not a directory")
+	}
+	if err := unix.Fchown(fd, uid, gid); err != nil {
+		_ = unix.Close(fd)
+		return -1, err
+	}
+	if err := unix.Fchmod(fd, 0o700); err != nil {
+		_ = unix.Close(fd)
+		return -1, err
+	}
+	return fd, nil
+}
+
+func installShellProfile(home string, uid, gid int) error {
+	homeFD, err := unix.Open(home, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
 		return err
 	}
-	return os.Chmod("/home/agent", 0o700)
+	defer unix.Close(homeFD)
+	return installShellProfileAt(homeFD, uid, gid)
+}
+
+func installShellProfileAt(homeFD, uid, gid int) error {
+	managed := "# Managed by Cohotfs.\n" + managedShellExports(os.Environ()) + `
+if [[ $- == *i* ]]; then
+  export TERM="${TERM:-xterm-256color}"
+  export COLORTERM="${COLORTERM:-truecolor}"
+  export CLICOLOR=1
+  alias ls='ls --color=auto'
+  alias grep='grep --color=auto'
+  PS1='\[\033[1;36m\]\u@cohotfs\[\033[0m\]:\[\033[1;34m\]\w\[\033[0m\]\$ '
+fi
+`
+	configFD, err := ensureShellDirectory(homeFD, ".config", uid, gid)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(configFD)
+	cohotfsFD, err := ensureShellDirectory(configFD, "cohotfs", uid, gid)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(cohotfsFD)
+	if err := writeOwnedShellFile(cohotfsFD, "bashrc", managed, uid, gid); err != nil {
+		return err
+	}
+	if err := appendOwnedShellBlock(homeFD, ".bashrc", "# Cohotfs interactive defaults\nif [ -r \"$HOME/.config/cohotfs/bashrc\" ]; then . \"$HOME/.config/cohotfs/bashrc\"; fi\n", uid, gid); err != nil {
+		return err
+	}
+	return appendOwnedShellBlock(homeFD, ".bash_profile", "# Cohotfs login shell\nif [ -r \"$HOME/.bashrc\" ]; then . \"$HOME/.bashrc\"; fi\nif [ -r \"$HOME/.config/cohotfs/bashrc\" ]; then . \"$HOME/.config/cohotfs/bashrc\"; fi\n", uid, gid)
+}
+
+var managedShellEnvironmentNames = []string{
+	"PATH", "TMPDIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
+	"PI_CODING_AGENT_DIR", "COHOTFS_CDP_URL", "COHOTFS_MANAGED_TOOLCHAINS",
+	"GOROOT", "GOTOOLCHAIN", "GOMODCACHE", "GOCACHE", "GOPATH", "GOBIN", "GOENV", "GOTMPDIR",
+	"RUSTC", "RUSTDOC", "CARGO_HOME", "CARGO_TARGET_DIR", "CARGO_INSTALL_ROOT",
+}
+
+func managedShellExports(environment []string) string {
+	allowed := make(map[string]bool, len(managedShellEnvironmentNames))
+	for _, name := range managedShellEnvironmentNames {
+		allowed[name] = true
+	}
+	values := make(map[string]string, len(managedShellEnvironmentNames))
+	for _, item := range environment {
+		name, value, ok := strings.Cut(item, "=")
+		if ok && allowed[name] {
+			values[name] = value
+		}
+	}
+	var result strings.Builder
+	for _, name := range managedShellEnvironmentNames {
+		if value, ok := values[name]; ok {
+			fmt.Fprintf(&result, "export %s='%s'\n", name, strings.ReplaceAll(value, "'", "'\"'\"'"))
+		}
+	}
+	return result.String()
+}
+
+func ensureShellDirectory(parentFD int, name string, uid, gid int) (int, error) {
+	created := false
+	if err := unix.Mkdirat(parentFD, name, 0o700); err == nil {
+		created = true
+	} else if !errors.Is(err, unix.EEXIST) {
+		return -1, err
+	}
+	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, err
+	}
+	if created {
+		if err := unix.Fchown(fd, uid, gid); err != nil {
+			_ = unix.Close(fd)
+			return -1, err
+		}
+	}
+	if err := validateShellPath(fd, uid, gid, true); err != nil {
+		_ = unix.Close(fd)
+		return -1, err
+	}
+	return fd, nil
+}
+
+func writeOwnedShellFile(parentFD int, name, content string, uid, gid int) error {
+	file, err := openOwnedShellFile(parentFD, name, uid, gid)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if err := file.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(file, content); err != nil {
+		return err
+	}
+	return file.Sync()
+}
+
+func appendOwnedShellBlock(parentFD int, name, block string, uid, gid int) error {
+	file, err := openOwnedShellFile(parentFD, name, uid, gid)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() > 1<<20 {
+		return fmt.Errorf("%s exceeds 1 MiB", name)
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, 1<<20+1))
+	if err != nil {
+		return err
+	}
+	marker := strings.SplitN(block, "\n", 2)[0]
+	if strings.Contains(string(raw), marker) {
+		return nil
+	}
+	if len(raw) != 0 && raw[len(raw)-1] != '\n' {
+		block = "\n" + block
+	}
+	if _, err := file.Seek(0, io.SeekEnd); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(file, block); err != nil {
+		return err
+	}
+	return file.Sync()
+}
+
+func openOwnedShellFile(parentFD int, name string, uid, gid int) (*os.File, error) {
+	fd, err := unix.Openat(parentFD, name, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	if err == nil {
+		if chownErr := unix.Fchown(fd, uid, gid); chownErr != nil {
+			_ = unix.Close(fd)
+			return nil, chownErr
+		}
+	} else if errors.Is(err, unix.EEXIST) {
+		fd, err = unix.Openat(parentFD, name, unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := validateShellPath(fd, uid, gid, false); err != nil {
+		_ = unix.Close(fd)
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), name), nil
+}
+
+func validateShellPath(fd, uid, gid int, directory bool) error {
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return err
+	}
+	expected := uint32(unix.S_IFREG)
+	if directory {
+		expected = unix.S_IFDIR
+	}
+	if stat.Mode&unix.S_IFMT != expected || int(stat.Uid) != uid || int(stat.Gid) != gid || stat.Mode&0o022 != 0 {
+		return fmt.Errorf("unsafe shell profile path")
+	}
+	return nil
 }
 
 func validateIdentity(passwd []passwdEntry, groups []groupEntry, uid, gid int) (userExists, groupExists bool, err error) {
 	for _, entry := range passwd {
 		if entry.Name == "agent" {
-			if entry.UID != uid || entry.GID != gid || entry.Home != "/home/agent" || entry.Shell != "/bin/sh" {
+			if entry.UID != uid || entry.GID != gid || entry.Home != "/home/agent" || entry.Shell != "/bin/bash" {
 				return false, false, fmt.Errorf("existing agent user does not match requested identity")
 			}
 			userExists = true

@@ -63,8 +63,8 @@ func TestWorkspaceEndToEnd(t *testing.T) {
 		if !bytes.Equal(stdout, payload) || len(stderr) != 0 {
 			t.Fatalf("SSH changed binary stream: got=%d want=%d stderr=%q", len(stdout), len(payload), stderr)
 		}
-		harness.assertPortForward(t, record, source, "127.0.0.1")
-		harness.assertPortForward(t, record, source, "0.0.0.0")
+		harness.assertPortForward(t, record, source, "127.0.0.1", 39001)
+		harness.assertPortForward(t, record, source, "0.0.0.0", 39002)
 		harness.copyWithSCP(t, record, payload, "/workspace/scp.bin")
 		harness.copyWithSFTP(t, record, payload, "/workspace/sftp.bin")
 		for _, path := range []string{"/workspace/scp.bin", "/workspace/sftp.bin"} {
@@ -379,7 +379,7 @@ func (h *harness) operationKey(operation string) string {
 func (h *harness) createWorkspace(t *testing.T, name, mode string, directorySocket bool, resources config.ResourceSpec) (state.Workspace, config.Workspace, string) {
 	t.Helper()
 	source := filepath.Join(h.home, "projects", name)
-	if err := os.MkdirAll(filepath.Join(source, ".cohotfs"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(source, "scripts"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	script := `#!/bin/sh
@@ -390,11 +390,12 @@ count=$((count + 1))
 printf '%s\n' "$count" > /workspace/setup-count
 printf 'ok\n' > /workspace/setup-result
 `
-	if err := os.WriteFile(filepath.Join(source, ".cohotfs", "setup.sh"), []byte(script), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(source, "scripts", "cohotfs-setup.sh"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	workspace := config.BuiltinWorkspace(name, h.tag)
 	workspace.Spec.Setup.Mode = mode
+	workspace.Spec.Setup.Command = []string{"/bin/sh", "scripts/cohotfs-setup.sh"}
 	workspace.Spec.Setup.Timeout = time.Minute
 	workspace.Spec.Resources = resources
 	raw, err := config.Render(workspace)
@@ -514,12 +515,11 @@ func (h *harness) sshOptions(t *testing.T, record state.Workspace) []string {
 	}
 }
 
-func (h *harness) assertPortForward(t *testing.T, record state.Workspace, source, bindHost string) {
+func (h *harness) assertPortForward(t *testing.T, record state.Workspace, source, bindHost string, containerPort int) {
 	t.Helper()
-	const containerPort = 39001
 	echoSource := filepath.Join(source, "loopback-echo.go")
 	echoBinary := filepath.Join(source, "loopback-echo")
-	program := `package main
+	program := fmt.Sprintf(`package main
 
 import (
 	"io"
@@ -527,7 +527,7 @@ import (
 )
 
 func main() {
-	listener, err := net.Listen("tcp4", "127.0.0.1:39001")
+	listener, err := net.Listen("tcp4", "127.0.0.1:%d")
 	if err != nil {
 		panic(err)
 	}
@@ -542,7 +542,7 @@ func main() {
 		}()
 	}
 }
-`
+`, containerPort)
 	if err := os.WriteFile(echoSource, []byte(program), 0o600); err != nil {
 		t.Fatal(err)
 	}

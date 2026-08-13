@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestCheckImageContract(t *testing.T) {
@@ -29,7 +31,7 @@ func TestCheckImageContract(t *testing.T) {
 	if err := os.WriteFile(rooted(root, "/.cohotfs/base.json"), raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{marker.AgentPath, "/usr/sbin/sshd", "/bin/sh"} {
+	for _, path := range []string{marker.AgentPath, "/usr/sbin/sshd", "/bin/sh", "/bin/bash"} {
 		if err := os.WriteFile(rooted(root, path), []byte("fixture"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -194,7 +196,7 @@ func TestBootstrapStrictnessAndIdentityConflicts(t *testing.T) {
 	if _, _, err := validateIdentity(users, nil, 1000, 1000); err == nil {
 		t.Fatal("accepted conflicting uid")
 	}
-	users = []passwdEntry{{Name: "agent", UID: 1000, GID: 1000, Home: "/home/agent", Shell: "/bin/sh"}}
+	users = []passwdEntry{{Name: "agent", UID: 1000, GID: 1000, Home: "/home/agent", Shell: "/bin/bash"}}
 	groups := []groupEntry{{Name: "agent", GID: 1000}}
 	userExists, groupExists, err := validateIdentity(users, groups, 1000, 1000)
 	if err != nil || !userExists || !groupExists {
@@ -291,5 +293,64 @@ func TestSSHRelayPreservesBinaryStream(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("relay did not stop")
+	}
+}
+
+func TestInstallShellProfilePreservesUserFilesAndEnablesLoginColors(t *testing.T) {
+	t.Setenv("PATH", "/cohotfs/agents/omp/bin:/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("PI_CODING_AGENT_DIR", "/home/agent/.omp/agent")
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, ".bashrc"), []byte("export USER_SETTING=kept\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := installShellProfile(home, os.Getuid(), os.Getgid()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bashrc, err := os.ReadFile(filepath.Join(home, ".bashrc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(bashrc), "# Cohotfs interactive defaults") != 1 || !strings.Contains(string(bashrc), "USER_SETTING=kept") {
+		t.Fatalf("bashrc = %q", bashrc)
+	}
+	login, err := os.ReadFile(filepath.Join(home, ".bash_profile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(login), "# Cohotfs login shell") != 1 || !strings.Contains(string(login), ". \"$HOME/.bashrc\"") || !strings.Contains(string(login), ". \"$HOME/.config/cohotfs/bashrc\"") {
+		t.Fatalf("bash profile = %q", login)
+	}
+	managed, err := os.ReadFile(filepath.Join(home, ".config", "cohotfs", "bashrc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"export PATH='/cohotfs/agents/omp/bin:/usr/local/bin:/usr/bin:/bin'", "export PI_CODING_AGENT_DIR='/home/agent/.omp/agent'", "[[ $- == *i* ]]", "CLICOLOR=1", "ls --color=auto", `\033[1;36m`} {
+		if !strings.Contains(string(managed), expected) {
+			t.Fatalf("managed profile missing %q: %q", expected, managed)
+		}
+	}
+}
+
+func TestEnsureAgentHomeRejectsSymlinkWithoutTouchingTarget(t *testing.T) {
+	parent := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Chmod(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(parent, "agent")); err != nil {
+		t.Fatal(err)
+	}
+	if fd, err := ensureAgentHome(parent, "agent", os.Getuid(), os.Getgid()); err == nil {
+		_ = unix.Close(fd)
+		t.Fatal("accepted symlinked agent home")
+	}
+	info, err := os.Stat(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("symlink target mode changed to %04o", info.Mode().Perm())
 	}
 }

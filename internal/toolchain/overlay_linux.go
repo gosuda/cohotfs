@@ -186,7 +186,10 @@ func mountKernelOverlay(overlay OverlayMount) error {
 		return err
 	}
 	options := "lowerdir=" + overlay.Lower + ",upperdir=" + overlay.Upper + ",workdir=" + overlay.Work + ",userxattr"
-	flags := uintptr(unix.MS_NODEV | unix.MS_NOSUID | unix.MS_NOEXEC)
+	flags := uintptr(unix.MS_NODEV | unix.MS_NOSUID)
+	if !overlay.Executable {
+		flags |= unix.MS_NOEXEC
+	}
 	if err := unix.Mount("overlay", overlay.Merged, "overlay", flags, options); err != nil {
 		return errors.Join(errOverlayUnavailable, err)
 	}

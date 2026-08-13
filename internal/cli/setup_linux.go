@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/gosuda/cohotfs/internal/config"
 	"github.com/gosuda/cohotfs/internal/containeragent"
@@ -28,17 +27,18 @@ func buildSetupCommand(deps Dependencies) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			manifest := filepath.Join(cwd, ".cohotfs", "workspace.yaml")
-			workspace, err := config.LoadWorkspace(manifest)
-			if err != nil {
-				return err
-			}
-			validation, err := setupservice.Validate(cwd, workspace.Spec.Setup, workspace.Spec.Image.Ref, containeragent.BootstrapAPI, os.Getuid(), os.Getgid())
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "command: %v\nuser: %s\ntimeout: %s\ndigest: %s\n", validation.Command, validation.User, validation.Timeout, validation.Digest)
-			return nil
+			return withRoot(deps, func(root *hostroot.Root) error {
+				workspace, _, err := loadProjectWorkspace(root, cwd)
+				if err != nil {
+					return err
+				}
+				validation, err := setupservice.Validate(cwd, workspace.Spec.Setup, workspace.Spec.Image.Ref, containeragent.BootstrapAPI, os.Getuid(), os.Getgid())
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "command: %v\nuser: %s\ntimeout: %s\ndigest: %s\n", validation.Command, validation.User, validation.Timeout, validation.Digest)
+				return nil
+			})
 		},
 	}
 	workspaceName := ""

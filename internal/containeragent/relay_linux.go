@@ -13,7 +13,7 @@ import (
 	"sync"
 )
 
-const defaultSSHRelaySocket = "/run/cohotfs/host/ssh/ssh.sock"
+const defaultSSHRelaySocket = "/run/cohotfs/transport/ssh/ssh.sock"
 
 func RunSSHRelay(ctx context.Context, socketPath, target string, ownerUID, ownerGID int) error {
 	if !filepath.IsAbs(socketPath) {

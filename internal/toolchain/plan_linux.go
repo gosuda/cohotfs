@@ -22,6 +22,7 @@ type OverlayMount struct {
 	Fallback    string `json:"fallback"`
 	Target      string `json:"target"`
 	Fingerprint string `json:"fingerprint"`
+	Executable  bool   `json:"executable,omitempty"`
 }
 
 type Plan struct {

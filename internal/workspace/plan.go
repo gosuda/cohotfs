@@ -14,6 +14,7 @@ import (
 
 	"github.com/gosuda/cohotfs/internal/config"
 	"github.com/gosuda/cohotfs/internal/containeragent"
+	"github.com/gosuda/cohotfs/internal/ompimport"
 	"github.com/gosuda/cohotfs/internal/runtime"
 	"github.com/gosuda/cohotfs/internal/toolchain"
 )
@@ -45,6 +46,7 @@ type Plan struct {
 	Integrations        map[string]bool         `json:"integrations"`
 	IntegrationSettings config.IntegrationsSpec `json:"integrationSettings"`
 	Toolchains          toolchain.Plan          `json:"toolchains,omitempty"`
+	OMP                 ompimport.Plan          `json:"omp,omitempty"`
 	Setup               config.SetupSpec        `json:"setup"`
 	CreatedAt           time.Time               `json:"createdAt"`
 }
@@ -82,8 +84,12 @@ func CompilePlan(workspace config.Workspace, workspaceID string, ownerUID, owner
 		},
 		IntegrationSettings: workspace.Spec.Integrations,
 	}
-	plan.Mounts = append(plan.Mounts, runtime.Mount{Source: canonicalSource, Target: workspace.Spec.Workspace.Target, Type: "bind", Propagation: "rprivate"})
-	plan.Environment = []string{"HOME=/home/agent", "XDG_CONFIG_HOME=/home/agent/.config", "XDG_CACHE_HOME=/home/agent/.cache", "XDG_DATA_HOME=/home/agent/.local/share", "TMPDIR=/home/agent/.tmp"}
+	plan.Mounts = append(plan.Mounts,
+		runtime.Mount{Source: canonicalSource, Target: workspace.Spec.Workspace.Target, Type: "bind", Propagation: "rprivate"},
+		runtime.Mount{Target: filepath.Join(workspace.Spec.Workspace.Target, ".cohotfs"), ReadOnly: true, Type: "tmpfs"},
+		runtime.Mount{Target: filepath.Join(workspace.Spec.Workspace.Target, ".omp"), ReadOnly: true, Type: "tmpfs"},
+	)
+	plan.Environment = []string{"HOME=/home/agent", "XDG_CONFIG_HOME=/home/agent/.config", "XDG_CACHE_HOME=/home/agent/.cache", "XDG_DATA_HOME=/home/agent/.local/share", "TMPDIR=/home/agent/.tmp", "TERM=xterm-256color", "COLORTERM=truecolor"}
 	if workspace.Spec.Integrations.Browser.Enabled {
 		plan.Environment = append(plan.Environment, "COHOTFS_CDP_URL=http://127.0.0.1:9222")
 	}
@@ -106,7 +112,7 @@ func CompilePlan(workspace config.Workspace, workspaceID string, ownerUID, owner
 	}
 	plan.SSH = SSHTransport{Kind: "directory-uds", SocketPath: sshSocketPath}
 	plan.Required = append(plan.Required, runtime.CapabilityHostSocketBind)
-	plan.Mounts = append(plan.Mounts, runtime.Mount{Source: filepath.Dir(sshSocketPath), Target: "/run/cohotfs/host/ssh", Type: "bind", Propagation: "rprivate"})
+	plan.Mounts = append(plan.Mounts, runtime.Mount{Source: filepath.Dir(sshSocketPath), Target: "/run/cohotfs/transport/ssh", Type: "bind", Propagation: "rprivate"})
 	for _, capability := range plan.Required {
 		if !backend.Capabilities[capability] {
 			return Plan{}, &runtime.UnsupportedError{Backend: backend.Name, Capability: capability}
@@ -122,11 +128,15 @@ func (p Plan) RuntimeSpec(bootstrapMount runtime.Mount) runtime.WorkspaceSpec {
 	}
 	mounts := append([]runtime.Mount{}, p.Mounts...)
 	mounts = append(mounts, p.Toolchains.Mounts...)
+	mounts = append(mounts, p.OMP.Mounts...)
 	mounts = append(mounts, bootstrapMount)
+	environment := append([]string(nil), p.Environment...)
+	environment = append(environment, p.Toolchains.Environment...)
+	environment = append(environment, p.OMP.Environment...)
 	return runtime.WorkspaceSpec{
 		WorkspaceID: p.WorkspaceID, OwnerUID: p.OwnerUID, OwnerGID: p.OwnerGID,
 		ManifestDigest: p.ManifestDigest, CreationNonce: p.CreationNonce, Image: p.Image,
-		Runtime: p.RuntimeAlias, Environment: append(append([]string(nil), p.Environment...), p.Toolchains.Environment...), Mounts: mounts,
+		Runtime: p.RuntimeAlias, Environment: environment, Mounts: mounts,
 		Resources: p.Resources, Labels: labels,
 	}
 }

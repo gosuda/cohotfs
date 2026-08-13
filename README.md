@@ -147,24 +147,24 @@ cohotfs onboard
 cohotfs doctor
 ```
 
-Initialize a repository and add its setup script:
+Initialize trusted policy for the current project:
 
 ```console
 cd ~/src/my-project
 cohotfs init
-cat > .cohotfs/setup.sh <<'EOF'
-#!/bin/sh
-set -eu
-test -d /workspace
-printf 'workspace ready\n'
-EOF
-chmod 0755 .cohotfs/setup.sh
+cohotfs config project show
+cohotfs config project edit
 ```
 
-This creates `.cohotfs/workspace.yaml` and a machine-local override below
-`~/.cohotfs/projects/`. The example setup is an intentionally small smoke check;
-replace it with the project's real dependency/bootstrap work. Review the
-generated image, setup, resource, and integration policy before first use.
+`init` writes the complete project policy only to
+`~/.cohotfs/projects/<source-hash>/workspace.yaml`; it does not create or modify
+repository files. The terminal editor handles integration toggles. Use
+`cohotfs config project edit --edit` with `$VISUAL` or `$EDITOR` to edit the full
+strict YAML document, including setup argv and resource limits. The generated
+policy uses manual no-op setup. If setup should run repository code, put it at a
+path such as `scripts/cohotfs-setup.sh` and explicitly set
+`spec.setup.command`; repository `.cohotfs` and `.omp` paths are masked inside
+the workspace and cannot host setup scripts.
 
 Bootstrap PID 1 remains container root, but setup commands, SSH shells, and
 `cohotfs exec` run with the host-mapped `agent` UID/GID. Setup is still trusted
@@ -218,35 +218,39 @@ Inspect runtime negotiation without guessing:
 cohotfs runtime list --output json
 cohotfs runtime capabilities --output json
 cohotfs config show
+cohotfs config project show
 ```
 
 ## Configuration
 
-Project policy lives in `.cohotfs/workspace.yaml`. Host-local grants—runtime
-endpoints, permitted external roots, browser executables, selected toolchains, and
-credential environment mappings—live in `~/.cohotfs/config.yaml` and cannot be
-expanded by a repository.
+Global host capabilities and defaults live in `~/.cohotfs/config.yaml`. The
+complete trusted policy for a project lives in
+`~/.cohotfs/projects/<source-hash>/workspace.yaml`, bound to that project's
+canonical source identity. Repository files never participate in policy
+resolution, so a checkout cannot grant itself host integrations.
 
-Precedence is:
+An initialized project's validated document is authoritative. In an
+uninitialized directory, Cohotfs resolves host defaults over built-ins. Host
+runtime endpoints, permitted external roots, browser executables, toolchain
+sources, and credential environment mappings remain machine-local in
+`~/.cohotfs/config.yaml`.
 
-```text
-command flags
-  > ~/.cohotfs/projects/<source-hash>/override.yaml
-  > .cohotfs/workspace.yaml
-  > ~/.cohotfs/config.yaml defaults
-  > built-ins
-```
+Both documents are strict YAML: unknown keys are errors. Run `cohotfs init` to
+write the complete project schema, then use `cohotfs config project edit` to
+enable only the integrations that project needs.
 
-Both documents are strict YAML: unknown keys are errors, not creative suggestions.
-Run `cohotfs init` to generate the complete workspace schema, then enable only the
-integrations the project needs.
+OMP is opt-in. When enabled, its selected binary, native modules, model catalog,
+and non-secret configuration are cloned into workspace-owned writable snapshots;
+container writes cannot modify the host copies. Set `requireCow: true` to require
+reflink support instead of allowing a private copy-once fallback. OAuth/session
+databases (`agent.db` and its WAL/SHM files) are never imported or mounted.
 
 All host-side state stays under:
 
 ```text
 ~/.cohotfs/
 ├── config.yaml
-├── projects/                 # machine-local project overrides
+├── projects/                 # source-bound trusted project policies
 ├── state/                    # workspaces, plans, and operation journals
 ├── workspaces/               # private homes, system state, and toolchain views
 ├── ssh/                      # Cohotfs client key and pinned workspace host keys

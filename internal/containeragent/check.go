@@ -49,7 +49,7 @@ func CheckImage(root, requestedAPI string) (BaseMarker, error) {
 	for _, required := range []struct {
 		path         string
 		allowSymlink bool
-	}{{marker.AgentPath, false}, {"/usr/sbin/sshd", true}, {"/bin/sh", true}} {
+	}{{marker.AgentPath, false}, {"/usr/sbin/sshd", true}, {"/bin/sh", true}, {"/bin/bash", true}} {
 		path := strings.TrimPrefix(required.path, "/")
 		info, err := imageRoot.Lstat(path)
 		if err != nil || info.Mode()&os.ModeSymlink != 0 && !required.allowSymlink {

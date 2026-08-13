@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestInstallSeedsCopiesIntoPrivateHomeAndRefusesOverwrite(t *testing.T) {
+func TestInstallSeedsCopiesIntoPrivateHomeAndRefreshesOnRestart(t *testing.T) {
 	sourceRoot := t.TempDir()
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(sourceRoot, "codex"), 0o700); err != nil {
@@ -32,8 +32,15 @@ func TestInstallSeedsCopiesIntoPrivateHomeAndRefusesOverwrite(t *testing.T) {
 	if err != nil || string(data) != "model='fixture'\n" {
 		t.Fatalf("installed = %q, %v", data, err)
 	}
-	if err := InstallSeeds(manifestPath, sourceRoot, home, os.Getuid(), os.Getgid()); err == nil {
-		t.Fatal("seed install overwrote existing private config")
+	if err := os.WriteFile(filepath.Join(sourceRoot, "codex", "config.toml"), []byte("model='updated'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := InstallSeeds(manifestPath, sourceRoot, home, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(installed)
+	if err != nil || string(data) != "model='updated'\n" {
+		t.Fatalf("refreshed = %q, %v", data, err)
 	}
 }
 

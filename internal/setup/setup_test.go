@@ -17,14 +17,14 @@ import (
 
 func TestValidateSetupContract(t *testing.T) {
 	source := t.TempDir()
-	script := filepath.Join(source, ".cohotfs", "setup.sh")
+	script := filepath.Join(source, "scripts", "cohotfs-setup.sh")
 	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(script, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	spec := config.SetupSpec{Mode: "once", Command: []string{"/bin/sh", ".cohotfs/setup.sh"}, Timeout: time.Minute}
+	spec := config.SetupSpec{Mode: "once", Command: []string{"/bin/sh", "scripts/cohotfs-setup.sh"}, Timeout: time.Minute}
 	validation, err := Validate(source, spec, "sha256:image", "v1alpha1", 1000, 1000)
 	if err != nil {
 		t.Fatal(err)
@@ -55,6 +55,36 @@ func TestValidateRejectsEscapingScript(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsInTreeSetupSymlink(t *testing.T) {
+	source := t.TempDir()
+	target := filepath.Join(source, "real.sh")
+	if err := os.WriteFile(target, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real.sh", filepath.Join(source, "setup.sh")); err != nil {
+		t.Fatal(err)
+	}
+	spec := config.SetupSpec{Mode: "once", Command: []string{"/bin/sh", "setup.sh"}, Timeout: time.Minute}
+	if _, err := Validate(source, spec, "image", "v1alpha1", 1000, 1000); err == nil {
+		t.Fatal("accepted in-tree setup script symlink")
+	}
+}
+
+func TestValidateRejectsMaskedSetupScript(t *testing.T) {
+	source := t.TempDir()
+	script := filepath.Join(source, ".cohotfs", "setup.sh")
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := config.SetupSpec{Mode: "once", Command: []string{"/bin/sh", ".cohotfs/setup.sh"}, Timeout: time.Minute}
+	if _, err := Validate(source, spec, "image", "v1alpha1", 1000, 1000); err == nil {
+		t.Fatal("accepted setup script hidden by the workspace policy mask")
+	}
+}
+
 func TestShouldRunModes(t *testing.T) {
 	success := state.SetupResult{Succeeded: true}
 	failure := state.SetupResult{Succeeded: false}
@@ -79,6 +109,7 @@ type setupBackend struct {
 	result   runtime.ExecResult
 	err      error
 	requests int
+	last     runtime.ExecRequest
 }
 
 func (f *setupBackend) Probe(context.Context) (runtime.BackendInfo, error) {
@@ -91,8 +122,9 @@ func (f *setupBackend) Create(context.Context, runtime.WorkspaceSpec) (runtime.W
 	return runtime.WorkspaceRef{}, nil
 }
 func (f *setupBackend) Start(context.Context, runtime.WorkspaceRef) error { return nil }
-func (f *setupBackend) ExecSync(context.Context, runtime.WorkspaceRef, runtime.ExecRequest) (runtime.ExecResult, error) {
+func (f *setupBackend) ExecSync(_ context.Context, _ runtime.WorkspaceRef, request runtime.ExecRequest) (runtime.ExecResult, error) {
 	f.requests++
+	f.last = request
 	return f.result, f.err
 }
 func (f *setupBackend) Inspect(context.Context, runtime.WorkspaceRef) (runtime.WorkspaceStatus, error) {
@@ -100,6 +132,38 @@ func (f *setupBackend) Inspect(context.Context, runtime.WorkspaceRef) (runtime.W
 }
 func (f *setupBackend) Stop(context.Context, runtime.WorkspaceRef, time.Duration) error { return nil }
 func (f *setupBackend) Delete(context.Context, runtime.WorkspaceRef) error              { return nil }
+
+func TestManualNoopSetupValidatesAndRuns(t *testing.T) {
+	spec := config.BuiltinWorkspace("project", "example.invalid/base:dev").Spec.Setup
+	validation, err := Validate(t.TempDir(), spec, "image", "v1alpha2", 1000, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if validation.Script != "" || validation.Digest == "" {
+		t.Fatalf("no-op validation = %#v", validation)
+	}
+	root, err := hostroot.OpenForTest(filepath.Join(t.TempDir(), "root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	store, err := state.NewStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := state.NewWorkspaceID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveWorkspace(state.Workspace{ID: id, Status: state.StatusReady, RuntimeRef: runtime.WorkspaceRef{Backend: "docker", IDs: map[string]string{"container": "container"}, Nonce: "nonce"}}); err != nil {
+		t.Fatal(err)
+	}
+	backend := &setupBackend{result: runtime.ExecResult{ExitCode: 0}}
+	record, err := NewService(store, backend).Run(context.Background(), id, spec, validation, true, false)
+	if err != nil || !record.Setup.Succeeded || backend.requests != 1 || len(backend.last.Argv) == 0 || backend.last.Argv[len(backend.last.Argv)-1] != "/bin/true" {
+		t.Fatalf("manual no-op record=%#v request=%#v err=%v", record, backend.last, err)
+	}
+}
 
 func TestSetupFailureAndOnceSuccess(t *testing.T) {
 	root, err := hostroot.OpenForTest(filepath.Join(t.TempDir(), "root"))

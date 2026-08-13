@@ -33,15 +33,21 @@ func ReadIdentity(pid int) (Identity, error) {
 	if err != nil {
 		return Identity{}, err
 	}
-	executable, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+	procExecutable := fmt.Sprintf("/proc/%d/exe", pid)
+	executable, err := os.Readlink(procExecutable)
 	if err != nil {
 		return Identity{}, fmt.Errorf("read executable: %w", err)
 	}
-	executable, err = filepath.EvalSymlinks(executable)
-	if err != nil {
-		return Identity{}, fmt.Errorf("canonicalize executable: %w", err)
+	const deletedSuffix = " (deleted)"
+	if strings.HasSuffix(executable, deletedSuffix) {
+		executable = filepath.Clean(strings.TrimSuffix(executable, deletedSuffix))
+	} else {
+		executable, err = filepath.EvalSymlinks(executable)
+		if err != nil {
+			return Identity{}, fmt.Errorf("canonicalize executable: %w", err)
+		}
 	}
-	digest, err := FileDigest(executable)
+	digest, err := FileDigest(procExecutable)
 	if err != nil {
 		return Identity{}, err
 	}

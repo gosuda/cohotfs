@@ -59,7 +59,7 @@ func InstallSeeds(manifestPath, sourceRoot, home string, uid, gid int) error {
 		if err != nil {
 			return err
 		}
-		output, err := unix.Open(destination, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, seed.Mode)
+		output, err := unix.Open(destination, unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC|unix.O_NOFOLLOW|unix.O_CLOEXEC, seed.Mode)
 		if err != nil {
 			_ = unix.Close(input)
 			return err

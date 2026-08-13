@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,9 +26,28 @@ type Validation struct {
 	Script  string        `json:"script"`
 }
 
+type validationAudit struct {
+	Setup        config.SetupSpec `json:"setup"`
+	ImageDigest  string           `json:"imageDigest"`
+	BootstrapAPI string           `json:"bootstrapAPI"`
+	OwnerUID     int              `json:"ownerUID"`
+	OwnerGID     int              `json:"ownerGID"`
+	ScriptPath   string           `json:"scriptPath,omitempty"`
+	ScriptSHA256 string           `json:"scriptSHA256,omitempty"`
+	ScriptDevice uint64           `json:"scriptDevice,omitempty"`
+	ScriptInode  uint64           `json:"scriptInode,omitempty"`
+}
+
 func Validate(source string, spec config.SetupSpec, imageDigest, bootstrapAPI string, ownerUID, ownerGID int) (Validation, error) {
 	if len(spec.Command) == 0 || spec.Command[0] == "" || spec.Timeout <= 0 {
 		return Validation{}, fmt.Errorf("setup command must be a non-empty argv and timeout must be positive")
+	}
+	audit := validationAudit{
+		Setup: spec, ImageDigest: imageDigest, BootstrapAPI: bootstrapAPI,
+		OwnerUID: ownerUID, OwnerGID: ownerGID,
+	}
+	if len(spec.Command) == 1 && spec.Command[0] == "/bin/true" {
+		return completeValidation(spec, ownerUID, ownerGID, audit)
 	}
 	canonicalSource, err := filepath.Abs(source)
 	if err != nil {
@@ -55,6 +75,13 @@ func Validate(source string, spec config.SetupSpec, imageDigest, bootstrapAPI st
 		return Validation{}, fmt.Errorf("setup script must be relative to the workspace source")
 	}
 	scriptPath := filepath.Join(canonicalSource, scriptArgument)
+	originalInfo, err := os.Lstat(scriptPath)
+	if err != nil {
+		return Validation{}, err
+	}
+	if !originalInfo.Mode().IsRegular() || originalInfo.Mode()&os.ModeSymlink != 0 || originalInfo.Mode().Perm()&0o002 != 0 {
+		return Validation{}, fmt.Errorf("setup script must be regular, non-symlink, and not other-writable")
+	}
 	canonicalScript, err := filepath.EvalSymlinks(scriptPath)
 	if err != nil {
 		return Validation{}, fmt.Errorf("resolve setup script: %w", err)
@@ -62,37 +89,55 @@ func Validate(source string, spec config.SetupSpec, imageDigest, bootstrapAPI st
 	if !beneath(canonicalScript, canonicalSource) {
 		return Validation{}, fmt.Errorf("setup script escapes workspace source")
 	}
-	info, err := os.Lstat(canonicalScript)
+	relativeScript, err := filepath.Rel(canonicalSource, canonicalScript)
 	if err != nil {
 		return Validation{}, err
 	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o002 != 0 {
-		return Validation{}, fmt.Errorf("setup script must be regular, non-symlink, and not other-writable")
+	for _, reserved := range []string{".cohotfs", ".omp"} {
+		if relativeScript == reserved || strings.HasPrefix(relativeScript, reserved+string(filepath.Separator)) {
+			return Validation{}, fmt.Errorf("setup script is hidden by reserved workspace path %s", reserved)
+		}
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
+	file, err := os.OpenFile(scriptPath, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return Validation{}, err
+	}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return Validation{}, err
+	}
+	originalStat, originalOK := originalInfo.Sys().(*syscall.Stat_t)
+	openedStat, openedOK := openedInfo.Sys().(*syscall.Stat_t)
+	if !originalOK || !openedOK {
 		return Validation{}, fmt.Errorf("setup script identity unavailable")
 	}
-	content, err := os.ReadFile(canonicalScript)
+	if originalStat.Dev != openedStat.Dev || originalStat.Ino != openedStat.Ino {
+		return Validation{}, fmt.Errorf("setup script changed during validation")
+	}
+	content, err := io.ReadAll(file)
 	if err != nil {
 		return Validation{}, err
 	}
-	audit := struct {
-		Setup        config.SetupSpec `json:"setup"`
-		ImageDigest  string           `json:"imageDigest"`
-		BootstrapAPI string           `json:"bootstrapAPI"`
-		OwnerUID     int              `json:"ownerUID"`
-		OwnerGID     int              `json:"ownerGID"`
-		ScriptPath   string           `json:"scriptPath"`
-		ScriptSHA256 string           `json:"scriptSHA256"`
-		ScriptDevice uint64           `json:"scriptDevice"`
-		ScriptInode  uint64           `json:"scriptInode"`
-	}{spec, imageDigest, bootstrapAPI, ownerUID, ownerGID, canonicalScript, digest(content), uint64(stat.Dev), stat.Ino}
+	audit.ScriptPath = canonicalScript
+	audit.ScriptSHA256 = digest(content)
+	audit.ScriptDevice = uint64(openedStat.Dev)
+	audit.ScriptInode = openedStat.Ino
+	return completeValidation(spec, ownerUID, ownerGID, audit)
+}
+
+func completeValidation(spec config.SetupSpec, ownerUID, ownerGID int, audit validationAudit) (Validation, error) {
 	raw, err := json.Marshal(audit)
 	if err != nil {
 		return Validation{}, err
 	}
-	return Validation{Command: append([]string(nil), spec.Command...), User: fmt.Sprintf("%d:%d", ownerUID, ownerGID), Timeout: spec.Timeout, Digest: digest(raw), Script: canonicalScript}, nil
+	return Validation{
+		Command: append([]string(nil), spec.Command...),
+		User:    fmt.Sprintf("%d:%d", ownerUID, ownerGID),
+		Timeout: spec.Timeout,
+		Digest:  digest(raw),
+		Script:  audit.ScriptPath,
+	}, nil
 }
 
 func digest(value []byte) string {

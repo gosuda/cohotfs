@@ -1,11 +1,7 @@
 package config
 
 import (
-	"bytes"
-	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -15,91 +11,6 @@ type WorkspaceFlags struct {
 	Backend   *string
 	Isolation *string
 	ImageRef  *string
-}
-
-type projectOverrideDocument struct {
-	TypeMeta     `yaml:",inline"`
-	SourcePath   string    `yaml:"sourcePath"`
-	SourceDigest string    `yaml:"sourceDigest"`
-	Workspace    yaml.Node `yaml:"workspace,omitempty"`
-}
-
-// ResolveWorkspace applies built-ins, host defaults, repository configuration,
-// machine-local override, then explicit flags. Unknown keys are rejected after
-// merge, so a partial higher-precedence document cannot smuggle new fields.
-func ResolveWorkspace(manifestPath, overridePath string, host HostConfig, flags WorkspaceFlags, imageRef string) (Workspace, error) {
-	projectRoot := filepath.Dir(filepath.Dir(manifestPath))
-	canonical, digest, _, err := ProjectIdentity(projectRoot)
-	if err != nil {
-		return Workspace{}, err
-	}
-	name := filepath.Base(canonical)
-	base := BuiltinWorkspace(name, imageRef)
-	applyHostDefaults(&base, host.Defaults)
-	baseRaw, err := Render(base)
-	if err != nil {
-		return Workspace{}, err
-	}
-	baseNode, err := documentNode(baseRaw)
-	if err != nil {
-		return Workspace{}, err
-	}
-
-	repositoryRaw, err := os.ReadFile(manifestPath)
-	if err != nil {
-		return Workspace{}, err
-	}
-	var repositoryMeta TypeMeta
-	if err := yaml.Unmarshal(repositoryRaw, &repositoryMeta); err != nil {
-		return Workspace{}, err
-	}
-	if repositoryMeta.APIVersion != APIVersion || repositoryMeta.Kind != WorkspaceKind {
-		return Workspace{}, fmt.Errorf("unsupported document %s %s", repositoryMeta.APIVersion, repositoryMeta.Kind)
-	}
-	repositoryNode, err := documentNode(repositoryRaw)
-	if err != nil {
-		return Workspace{}, err
-	}
-	mergeMapping(baseNode, repositoryNode)
-
-	if overridePath != "" {
-		overrideRaw, readErr := os.ReadFile(overridePath)
-		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-			return Workspace{}, readErr
-		}
-		if readErr == nil {
-			var override projectOverrideDocument
-			if err := decodeStrict(overrideRaw, &override); err != nil {
-				return Workspace{}, fmt.Errorf("parse project override: %w", err)
-			}
-			if override.APIVersion != APIVersion || override.Kind != "ProjectOverride" || override.SourcePath != canonical || override.SourceDigest != digest {
-				return Workspace{}, fmt.Errorf("project override identity mismatch")
-			}
-			if override.Workspace.Kind != 0 {
-				if override.Workspace.Kind != yaml.MappingNode {
-					return Workspace{}, fmt.Errorf("project override workspace must be a mapping")
-				}
-				mergeMapping(baseNode, &override.Workspace)
-			}
-		}
-	}
-
-	var merged bytes.Buffer
-	encoder := yaml.NewEncoder(&merged)
-	encoder.SetIndent(2)
-	if err := encoder.Encode(baseNode); err != nil {
-		return Workspace{}, err
-	}
-	_ = encoder.Close()
-	workspace, err := DecodeWorkspace(merged.Bytes())
-	if err != nil {
-		return Workspace{}, err
-	}
-	applyFlags(&workspace, flags)
-	if err := workspace.Validate(); err != nil {
-		return Workspace{}, err
-	}
-	return workspace, nil
 }
 
 // ResolveDefaultWorkspace applies built-ins and host defaults without requiring

@@ -33,7 +33,7 @@ func (h *fixtureIntegrationHost) Acquire(_ context.Context, request api.LeaseReq
 		h.active = map[string]api.LeaseSummary{}
 	}
 	h.active[id] = api.LeaseSummary{LeaseID: id, WorkspaceID: request.WorkspaceID, Kind: request.Kind}
-	return api.LeaseResponse{LeaseID: id, Endpoint: "/run/cohotfs/host/" + string(request.Kind) + ".sock"}, nil
+	return api.LeaseResponse{LeaseID: id, Endpoint: "/run/cohotfs/integrations/" + string(request.Kind) + ".sock"}, nil
 }
 
 func (h *fixtureIntegrationHost) Release(_ context.Context, request api.ReleaseRequest) error {
@@ -81,7 +81,7 @@ func TestIntegrationLeaseFailureRollsBackBeforeContainerStart(t *testing.T) {
 	}
 	foundHostMount := false
 	for _, mount := range backend.created.Mounts {
-		foundHostMount = foundHostMount || mount.Target == "/run/cohotfs/host" && mount.ReadOnly
+		foundHostMount = foundHostMount || mount.Target == "/run/cohotfs/integrations" && mount.ReadOnly
 	}
 	if !foundHostMount {
 		t.Fatal("explicit integrations did not add a read-only host socket mount")

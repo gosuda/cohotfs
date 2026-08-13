@@ -19,6 +19,7 @@ import (
 	"github.com/gosuda/cohotfs/internal/config"
 	"github.com/gosuda/cohotfs/internal/hostroot"
 	"github.com/gosuda/cohotfs/internal/hostservice"
+	"github.com/gosuda/cohotfs/internal/ompimport"
 	"github.com/gosuda/cohotfs/internal/runtime"
 	"github.com/gosuda/cohotfs/internal/runtime/docker"
 	"github.com/gosuda/cohotfs/internal/state"
@@ -154,33 +155,20 @@ type preparedWorkspace struct {
 }
 
 func prepareWorkspaceDirectory(root *hostroot.Root, cwd string, host config.HostConfig, mountCurrentDirectory bool) (preparedWorkspace, error) {
-	canonical, _, projectKey, err := config.ProjectIdentity(cwd)
+	canonical, _, _, err := config.ProjectIdentity(cwd)
 	if err != nil {
 		return preparedWorkspace{}, apperr.Wrap(apperr.ExitUsage, "project", err, "resolve current directory: %v", err)
 	}
-	manifestPath := filepath.Join(canonical, ".cohotfs", "workspace.yaml")
-	_, readErr := os.Lstat(manifestPath)
-
-	var workspace config.Workspace
-	switch {
-	case readErr == nil:
-		overridePath, err := root.HostPath(filepath.Join("projects", projectKey, "override.yaml"))
-		if err != nil {
-			return preparedWorkspace{}, err
-		}
-		workspace, err = config.ResolveWorkspace(manifestPath, overridePath, host, config.WorkspaceFlags{}, defaultImageReference())
-		if err != nil {
-			return preparedWorkspace{}, apperr.Wrap(apperr.ExitUsage, "manifest", err, "resolve workspace: %v", err)
-		}
-	case errors.Is(readErr, os.ErrNotExist):
+	workspace, _, loadErr := loadProjectWorkspace(root, canonical)
+	if errors.Is(loadErr, os.ErrNotExist) {
 		workspace, err = config.ResolveDefaultWorkspace(workspaceNameForPath(canonical), host, config.WorkspaceFlags{}, defaultImageReference())
 		if err != nil {
 			return preparedWorkspace{}, apperr.Wrap(apperr.ExitUsage, "workspace", err, "resolve default workspace: %v", err)
 		}
 		workspace.Spec.Image.PullPolicy = defaultImagePullPolicy()
 		workspace.Spec.Setup.Mode = "manual"
-	default:
-		return preparedWorkspace{}, apperr.Wrap(apperr.ExitUsage, "manifest", readErr, "read workspace manifest: %v", readErr)
+	} else if loadErr != nil {
+		return preparedWorkspace{}, apperr.Wrap(apperr.ExitUsage, "project_config", loadErr, "load trusted project config: %v", loadErr)
 	}
 
 	sourcePath := filepath.Join(canonical, workspace.Spec.Workspace.Source)
@@ -197,7 +185,7 @@ func prepareWorkspaceDirectory(root *hostroot.Root, cwd string, host config.Host
 	if err != nil {
 		return preparedWorkspace{}, err
 	}
-	return preparedWorkspace{workspace: workspace, projectRoot: canonical, source: source, digest: workspaceservice.ManifestDigest(effectiveRaw)}, nil
+	return preparedWorkspace{workspace: workspace, projectRoot: canonical, source: source, maskCohotfsRoot: true, digest: workspaceservice.ManifestDigest(effectiveRaw)}, nil
 }
 
 func workspaceNameForPath(canonical string) string {
@@ -241,6 +229,14 @@ func createPreparedWorkspace(ctx context.Context, root *hostroot.Root, backend *
 	var selectedToolchains []toolchain.Candidate
 	overlayAvailable := false
 	toolchains := prepared.workspace.Spec.Integrations.HostToolchains
+	ompSpec := prepared.workspace.Spec.Integrations.Agents.OMP
+	needsOverlay := toolchains.Enabled && (toolchains.Go.Enabled && toolchains.Go.Caches == "cow" || toolchains.Rust.Enabled && toolchains.Rust.Caches == "cow")
+	if needsOverlay {
+		overlayAvailable, err = toolchain.ProbeOverlay(root)
+		if err != nil {
+			return state.Workspace{}, apperr.Wrap(apperr.ExitRuntime, "overlay_probe", err, "probe host OverlayFS: %v", err)
+		}
+	}
 	if toolchains.Enabled {
 		candidates, err := toolchain.Discover(ctx, os.Environ())
 		if err != nil {
@@ -250,11 +246,12 @@ func createPreparedWorkspace(ctx context.Context, root *hostroot.Root, backend *
 		if err != nil {
 			return state.Workspace{}, apperr.Wrap(apperr.ExitPolicy, "toolchain_selection", err, "%v", err)
 		}
-		if toolchains.Go.Enabled && toolchains.Go.Caches == "cow" || toolchains.Rust.Enabled && toolchains.Rust.Caches == "cow" {
-			overlayAvailable, err = toolchain.ProbeOverlay(root)
-			if err != nil {
-				return state.Workspace{}, apperr.Wrap(apperr.ExitRuntime, "overlay_probe", err, "probe host cache OverlayFS: %v", err)
-			}
+	}
+	var ompSources ompimport.Sources
+	if ompSpec.Enabled && ompSpec.Import.Enabled {
+		ompSources, err = ompimport.Discover(os.Environ())
+		if err != nil {
+			return state.Workspace{}, apperr.Wrap(apperr.ExitUnavailable, "omp_import", err, "%v", err)
 		}
 	}
 
@@ -288,8 +285,8 @@ func createPreparedWorkspace(ctx context.Context, root *hostroot.Root, backend *
 		GVisorRuntime: host.Runtime.Docker.GVisorRuntime, SSHSocketPath: sshSocketPath, BootstrapSource: publicKeyPath,
 		OperationKey:        operationKey,
 		ToolchainCandidates: selectedToolchains, PermittedRoots: host.PermittedRoots, OverlayAvailable: overlayAvailable,
-		MaskCohotfsRoot: prepared.maskCohotfsRoot,
-		Environment:     os.Environ(),
+		OMPSources: ompSources, MaskCohotfsRoot: prepared.maskCohotfsRoot,
+		Environment: os.Environ(),
 	})
 	acknowledgeErr := acknowledge()
 	if err != nil {
@@ -304,7 +301,7 @@ func runBareWorkspace(deps Dependencies, cmd *cobra.Command, cwd string, homeMou
 		if err != nil {
 			return err
 		}
-		prepared.maskCohotfsRoot = homeMount
+		prepared.maskCohotfsRoot = true
 		if homeMount {
 			prepared.digest = workspaceservice.ManifestDigest([]byte(prepared.digest + "\nmask-home-cohotfs-root:v1"))
 		}
@@ -334,12 +331,12 @@ func runBareWorkspace(deps Dependencies, cmd *cobra.Command, cwd string, homeMou
 		default:
 			return apperr.New(apperr.ExitStateConflict, "state_conflict", "workspace %s is %s; wait for or recover the in-progress operation", record.ID, record.Status)
 		}
-		return runOpenSSH(cmd.Context(), cmd, root, record, true, bareWorkspaceRemoteCommand())
+		return runOpenSSH(cmd.Context(), cmd, root, record, sshRequestPTY, bareWorkspaceRemoteCommand())
 	})
 }
 
 func bareWorkspaceRemoteCommand() []string {
-	return []string{"/bin/sh", "-lc", "cd /workspace && exec /bin/sh -l"}
+	return []string{"/bin/bash", "-lc", "cd /workspace && exec /bin/bash -l"}
 }
 
 func workspaceForDirectory(store *state.Store, prepared preparedWorkspace) (state.Workspace, bool, error) {

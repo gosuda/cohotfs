@@ -39,7 +39,7 @@ func TestStageAgentSeedsCopiesOnlyAllowlistedNonSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	agents := config.AgentsSpec{OMP: config.AgentSpec{Enabled: true, Config: "seed"}, Codex: config.AgentSpec{Enabled: true, Config: "seed"}, Claude: config.AgentSpec{Enabled: true, Config: "seed"}}
+	agents := config.AgentsSpec{OMP: config.OMPAgentSpec{Enabled: true, Config: "seed"}, Codex: config.AgentSpec{Enabled: true, Config: "seed"}, Claude: config.AgentSpec{Enabled: true, Config: "seed"}}
 	staged, err := StageAgentSeeds(root, "aaaaaaaaaaaaaaaaaaaaaaaaaa", agents, []string{"HOME=" + home})
 	if err != nil {
 		t.Fatal(err)

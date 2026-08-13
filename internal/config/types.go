@@ -171,14 +171,29 @@ type GitCredentialsSpec struct {
 }
 
 type AgentsSpec struct {
-	OMP    AgentSpec `yaml:"omp" json:"omp"`
-	Codex  AgentSpec `yaml:"codex" json:"codex"`
-	Claude AgentSpec `yaml:"claude" json:"claude"`
+	OMP    OMPAgentSpec `yaml:"omp" json:"omp"`
+	Codex  AgentSpec    `yaml:"codex" json:"codex"`
+	Claude AgentSpec    `yaml:"claude" json:"claude"`
 }
 
 type AgentSpec struct {
 	Enabled bool   `yaml:"enabled" json:"enabled"`
 	Config  string `yaml:"config" json:"config"`
+}
+
+type OMPAgentSpec struct {
+	Enabled bool          `yaml:"enabled" json:"enabled"`
+	Config  string        `yaml:"config" json:"config"`
+	Import  OMPImportSpec `yaml:"import" json:"import"`
+}
+
+type OMPImportSpec struct {
+	Enabled    bool `yaml:"enabled" json:"enabled"`
+	Binary     bool `yaml:"binary" json:"binary"`
+	Natives    bool `yaml:"natives" json:"natives"`
+	Models     bool `yaml:"models" json:"models"`
+	Config     bool `yaml:"config" json:"config"`
+	RequireCOW bool `yaml:"requireCow" json:"requireCow"`
 }
 
 func BuiltinHostConfig() HostConfig {
@@ -200,12 +215,19 @@ func BuiltinWorkspace(name, imageRef string) Workspace {
 			Runtime:   RuntimeSpec{Backend: "docker", Isolation: "standard"},
 			Image:     ImageSpec{Ref: imageRef, PullPolicy: ImagePullAlways},
 			Workspace: SourceSpec{Source: ".", Target: "/workspace"},
-			Setup:     SetupSpec{Mode: "once", Command: []string{"/bin/sh", ".cohotfs/setup.sh"}, Timeout: 15 * time.Minute},
+			Setup:     SetupSpec{Mode: "manual", Command: []string{"/bin/true"}, Timeout: 15 * time.Minute},
 			Resources: ResourceSpec{CPU: 2, Memory: 4 << 30, MemorySwap: 5 << 30, PIDs: 512, Nofile: NofileLimit{Soft: 1024, Hard: 4096}},
 			Integrations: IntegrationsSpec{
 				HostToolchains: HostToolchainsSpec{Persistence: "workspace", Go: GoImportSpec{Root: "auto", Caches: "cow"}, Rust: RustImportSpec{Toolchain: "auto", Caches: "cow"}},
 				Browser:        BrowserSpec{Platform: "auto"},
-				Agents:         AgentsSpec{OMP: AgentSpec{Config: "seed"}, Codex: AgentSpec{Config: "seed"}, Claude: AgentSpec{Config: "seed"}},
+				Agents: AgentsSpec{
+					OMP: OMPAgentSpec{
+						Config: "seed",
+						Import: OMPImportSpec{Enabled: true, Binary: true, Natives: true, Models: true, Config: true, RequireCOW: false},
+					},
+					Codex:  AgentSpec{Config: "seed"},
+					Claude: AgentSpec{Config: "seed"},
+				},
 			},
 		},
 	}
@@ -265,10 +287,17 @@ func (w Workspace) Validate() error {
 	if browser.Executable != "" && !strings.HasPrefix(browser.Executable, "/") {
 		return fmt.Errorf("browser.executable must be an absolute path")
 	}
-	for name, agent := range map[string]AgentSpec{"omp": w.Spec.Integrations.Agents.OMP, "codex": w.Spec.Integrations.Agents.Codex, "claude": w.Spec.Integrations.Agents.Claude} {
+	if w.Spec.Integrations.Agents.OMP.Config != "seed" {
+		return fmt.Errorf("agents.omp.config must be seed")
+	}
+	for name, agent := range map[string]AgentSpec{"codex": w.Spec.Integrations.Agents.Codex, "claude": w.Spec.Integrations.Agents.Claude} {
 		if agent.Config != "seed" {
 			return fmt.Errorf("agents.%s.config must be seed", name)
 		}
+	}
+	omp := w.Spec.Integrations.Agents.OMP
+	if omp.Enabled && omp.Import.Enabled && !omp.Import.Binary {
+		return fmt.Errorf("enabled OMP import requires binary")
 	}
 	if w.Spec.Integrations.GitCredentials.Enabled && len(w.Spec.Integrations.GitCredentials.AllowedContexts) == 0 {
 		return fmt.Errorf("enabled gitCredentials requires at least one allowed context")

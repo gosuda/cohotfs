@@ -12,12 +12,15 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/gosuda/cohotfs/internal/apperr"
 	"github.com/gosuda/cohotfs/internal/config"
 	"github.com/gosuda/cohotfs/internal/hostroot"
 	"github.com/gosuda/cohotfs/internal/runtime/docker"
 	"github.com/gosuda/cohotfs/internal/state"
 	workspaceservice "github.com/gosuda/cohotfs/internal/workspace"
+	"github.com/spf13/cobra"
 )
 
 func testDependencies(path string) Dependencies {
@@ -65,8 +68,16 @@ func TestDefaultImagePullPolicySeparatesDevelopmentAndRelease(t *testing.T) {
 	}
 }
 
-func TestInitWritesOnlyManifestAndLocalOverride(t *testing.T) {
+func TestInitWritesOnlyTrustedHomeProjectConfig(t *testing.T) {
 	project := t.TempDir()
+	bin := filepath.Join(t.TempDir(), "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "omp"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
 	previous, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -80,24 +91,27 @@ func TestInitWritesOnlyManifestAndLocalOverride(t *testing.T) {
 	if code := Execute(context.Background(), []string{"init"}, &stdout, &stderr, testDependencies(rootPath)); code != 0 {
 		t.Fatalf("init code %d, stderr %s", code, stderr.String())
 	}
-	manifest := filepath.Join(project, ".cohotfs", "workspace.yaml")
-	raw, err := os.ReadFile(manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	generated, err := config.DecodeWorkspace(raw)
-	if err != nil {
-		t.Fatalf("generated invalid manifest: %v", err)
-	}
-	if generated.Spec.Image.Ref != "ghcr.io/gosuda/cohotfs/workspace-base:dev" || generated.Spec.Image.PullPolicy != config.ImagePullNever {
-		t.Fatalf("generated development image policy = %#v", generated.Spec.Image)
+	if _, err := os.Stat(filepath.Join(project, ".cohotfs")); !os.IsNotExist(err) {
+		t.Fatalf("init wrote repository configuration: %v", err)
 	}
 	_, _, key, err := config.ProjectIdentity(project)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(rootPath, "projects", key, "override.yaml")); err != nil {
+	path := filepath.Join(rootPath, "projects", key, "workspace.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
 		t.Fatal(err)
+	}
+	document, err := config.DecodeProject(raw, project)
+	if err != nil {
+		t.Fatalf("generated invalid project config: %v", err)
+	}
+	if document.Workspace.Spec.Image.Ref != "ghcr.io/gosuda/cohotfs/workspace-base:dev" || document.Workspace.Spec.Image.PullPolicy != config.ImagePullNever {
+		t.Fatalf("generated development image policy = %#v", document.Workspace.Spec.Image)
+	}
+	if document.Workspace.Spec.Integrations.Agents.OMP.Enabled {
+		t.Fatal("available OMP silently enabled a host integration")
 	}
 	if _, err := os.Stat(filepath.Join(project, ".gitignore")); !os.IsNotExist(err) {
 		t.Fatalf("init touched .gitignore: %v", err)
@@ -327,7 +341,7 @@ func TestPrepareBareWorkspaceMountsCurrentDirectoryWithoutManifest(t *testing.T)
 	}
 }
 
-func TestPrepareBareWorkspaceOverridesManifestSourceAndTarget(t *testing.T) {
+func TestPrepareBareWorkspaceIgnoresRepositoryManifest(t *testing.T) {
 	project := t.TempDir()
 	if err := os.Mkdir(filepath.Join(project, "child"), 0o755); err != nil {
 		t.Fatal(err)
@@ -368,14 +382,14 @@ func TestPrepareBareWorkspaceOverridesManifestSourceAndTarget(t *testing.T) {
 	if prepared.digest != workspaceservice.ManifestDigest(effective) {
 		t.Fatal("bare workspace digest does not describe the effective mount contract")
 	}
-	if prepared.digest == workspaceservice.ManifestDigest(raw) {
-		t.Fatal("bare workspace reused the raw manifest digest after overriding its mount")
+	if prepared.workspace.Metadata.Name == "configured" || prepared.digest == workspaceservice.ManifestDigest(raw) {
+		t.Fatal("bare workspace consumed repository-local configuration")
 	}
 }
 
 func TestBareWorkspaceRemoteCommandStartsInWorkspace(t *testing.T) {
 	remote := bareWorkspaceRemoteCommand()
-	if len(remote) != 3 || remote[0] != "/bin/sh" || remote[1] != "-lc" || remote[2] != "cd /workspace && exec /bin/sh -l" {
+	if len(remote) != 3 || remote[0] != "/bin/bash" || remote[1] != "-lc" || remote[2] != "cd /workspace && exec /bin/bash -l" {
 		t.Fatalf("bare remote command = %#v", remote)
 	}
 }
@@ -552,5 +566,110 @@ func TestWorkspaceRuntimeBlocksQuarantineExceptRecovery(t *testing.T) {
 	err = withWorkspaceRecoveryRuntime(context.Background(), testDependencies(rootPath), callback)
 	if err != nil || !called {
 		t.Fatalf("recovery operation error = %v, called = %v", err, called)
+	}
+}
+
+func TestExternalProjectEditorCommitsOnlyValidatedConfiguration(t *testing.T) {
+	project := t.TempDir()
+	root, err := hostroot.OpenForTest(filepath.Join(t.TempDir(), "root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	workspace := config.BuiltinWorkspace("project", "example.invalid/base:dev")
+	path, err := writeProjectDocument(root, project, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidEditor := filepath.Join(t.TempDir(), "invalid-editor")
+	if err := os.WriteFile(invalidEditor, []byte("#!/bin/sh\nprintf 'invalid: [' > \"$1\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VISUAL", "")
+	t.Setenv("EDITOR", invalidEditor)
+	command := &cobra.Command{}
+	command.SetContext(context.Background())
+	command.SetIn(bytes.NewReader(nil))
+	command.SetOut(&bytes.Buffer{})
+	command.SetErr(&bytes.Buffer{})
+	if err := editProjectConfigExternally(command, root, path, project); err == nil {
+		t.Fatal("accepted invalid edited project configuration")
+	}
+	afterInvalid, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterInvalid, original) {
+		t.Fatal("invalid editor result replaced the trusted configuration")
+	}
+
+	workspace.Spec.Integrations.Agents.OMP.Enabled = true
+	document, err := config.NewProjectDocument(project, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := config.Render(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementPath := filepath.Join(t.TempDir(), "replacement.yaml")
+	if err := os.WriteFile(replacementPath, replacement, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	validEditor := filepath.Join(t.TempDir(), "valid-editor")
+	if err := os.WriteFile(validEditor, []byte("#!/bin/sh\nexec /bin/cp \"$REPLACEMENT\" \"$1\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REPLACEMENT", replacementPath)
+	t.Setenv("EDITOR", validEditor)
+	if err := editProjectConfigExternally(command, root, path, project); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := config.LoadProject(path, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated.Workspace.Spec.Integrations.Agents.OMP.Enabled {
+		t.Fatal("valid external edit was not committed")
+	}
+}
+
+func TestSSHPTYModesDistinguishShellExecAndAgents(t *testing.T) {
+	for _, test := range []struct {
+		mode sshPTYMode
+		want string
+	}{
+		{sshNoPTY, "-T"},
+		{sshRequestPTY, "-t"},
+		{sshForcePTY, "-tt"},
+	} {
+		got, err := appendSSHPTYArguments([]string{"base"}, test.mode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 2 || got[1] != test.want {
+			t.Fatalf("PTY mode %d = %#v, want %s", test.mode, got, test.want)
+		}
+	}
+	if _, err := appendSSHPTYArguments(nil, sshPTYMode(255)); err == nil {
+		t.Fatal("accepted invalid SSH PTY mode")
+	}
+}
+
+func TestProjectConfigTUITogglesAndSavesOMPGrant(t *testing.T) {
+	model := projectConfigTUI{workspace: config.BuiltinWorkspace("project", "example.invalid/base:dev")}
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	model = updated.(projectConfigTUI)
+	if !model.workspace.Spec.Integrations.Agents.OMP.Enabled || model.saved {
+		t.Fatalf("toggle result = %#v", model)
+	}
+	updated, command := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	model = updated.(projectConfigTUI)
+	if !model.saved || command == nil || !model.workspace.Spec.Integrations.Agents.OMP.Import.Binary {
+		t.Fatalf("save result = %#v, command nil=%v", model, command == nil)
 	}
 }

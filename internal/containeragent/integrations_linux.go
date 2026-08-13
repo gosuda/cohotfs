@@ -12,9 +12,9 @@ import (
 const (
 	defaultSeedManifest = "/run/cohotfs/bootstrap/seeds.json"
 	defaultSeedRoot     = "/run/cohotfs/agent-seeds"
-	defaultCDPSocket    = "/run/cohotfs/host/cdp.sock"
-	defaultGitSocket    = "/run/cohotfs/host/git.sock"
-	defaultSecretSocket = "/run/cohotfs/host/secret.sock"
+	defaultCDPSocket    = "/run/cohotfs/integrations/cdp.sock"
+	defaultGitSocket    = "/run/cohotfs/integrations/git.sock"
+	defaultSecretSocket = "/run/cohotfs/integrations/secret.sock"
 )
 
 func installConfiguredIntegrations(bootstrap Bootstrap) error {

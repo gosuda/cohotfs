@@ -18,6 +18,7 @@ import (
 	"github.com/gosuda/cohotfs/internal/containeragent"
 	"github.com/gosuda/cohotfs/internal/hostroot"
 	"github.com/gosuda/cohotfs/internal/integration"
+	"github.com/gosuda/cohotfs/internal/ompimport"
 	"github.com/gosuda/cohotfs/internal/proc"
 	"github.com/gosuda/cohotfs/internal/runtime"
 	setupservice "github.com/gosuda/cohotfs/internal/setup"
@@ -96,6 +97,7 @@ type CreateRequest struct {
 	OperationKey        string
 	ToolchainCandidates []toolchain.Candidate
 	PermittedRoots      []string
+	OMPSources          ompimport.Sources
 	Environment         []string
 	OverlayAvailable    bool
 	MaskCohotfsRoot     bool
@@ -118,6 +120,7 @@ type createOperationInput struct {
 	ToolchainCandidates  []toolchain.Candidate       `json:"toolchainCandidates,omitempty"`
 	PermittedRoots       []string                    `json:"permittedRoots,omitempty"`
 	AgentSeedEnvironment map[string]string           `json:"agentSeedEnvironment,omitempty"`
+	OMPSources           ompimport.Sources           `json:"ompSources,omitempty"`
 	OverlayAvailable     bool                        `json:"overlayAvailable"`
 	MaskCohotfsRoot      bool                        `json:"maskCohotfsRoot"`
 }
@@ -151,7 +154,7 @@ func createOperationBody(request CreateRequest) ([]byte, error) {
 		GVisorRuntime: request.GVisorRuntime, SSHSocketPath: request.SSHSocketPath,
 		AuthorizedKeySHA256: fmt.Sprintf("%x", sha256.Sum256(publicKey)),
 		ToolchainCandidates: request.ToolchainCandidates, PermittedRoots: permittedRoots, AgentSeedEnvironment: seedEnvironment,
-		OverlayAvailable: request.OverlayAvailable, MaskCohotfsRoot: request.MaskCohotfsRoot,
+		OMPSources: request.OMPSources, OverlayAvailable: request.OverlayAvailable, MaskCohotfsRoot: request.MaskCohotfsRoot,
 	})
 }
 
@@ -225,13 +228,13 @@ func (s *DockerService) Create(ctx context.Context, request CreateRequest) (resu
 	}
 	plan.Mounts = append(plan.Mounts, persistentMounts...)
 	if request.MaskCohotfsRoot {
-		plan.Mounts = append(plan.Mounts, runtime.Mount{
-			Target:   filepath.Join(request.Workspace.Spec.Workspace.Target, ".cohotfs"),
-			ReadOnly: true,
-			Type:     "tmpfs",
-		})
+		// Kept in the operation identity for clean replay of legacy callers.
 	}
 	plan.Toolchains, err = toolchain.Compile(s.root, id, request.Workspace.Spec.Integrations.HostToolchains, request.ToolchainCandidates, request.PermittedRoots, request.OverlayAvailable)
+	if err != nil {
+		return state.Workspace{}, err
+	}
+	plan.OMP, err = ompimport.Compile(s.root, id, request.Workspace.Spec.Integrations.Agents.OMP, request.OMPSources)
 	if err != nil {
 		return state.Workspace{}, err
 	}
@@ -253,9 +256,6 @@ func (s *DockerService) Create(ctx context.Context, request CreateRequest) (resu
 	}
 	if err := s.store.SaveWorkspace(record); err != nil {
 		return state.Workspace{}, err
-	}
-	if err := s.store.SaveWorkspaceArtifact(id, "plan.json", append(planRaw, '\n')); err != nil {
-		return s.failCreate(record, nil, err)
 	}
 	mountResources, err := toolchain.Activate(&plan.Toolchains, request.Workspace.Spec.Integrations.HostToolchains.RequireCOW)
 	if err != nil {
@@ -329,16 +329,17 @@ func (s *DockerService) resumeCreatingLocked(ctx context.Context, request Create
 		quarantined, quarantineErr := s.quarantineCreate(record, err)
 		return quarantined, true, quarantineErr
 	}
-
 	active := activeMountResources(record.Resources)
-	if len(active) != len(plan.Toolchains.Overlays) {
+	expectedOverlays := len(plan.Toolchains.Overlays)
+	if len(active) != expectedOverlays {
 		if len(active) != 0 {
-			quarantined, quarantineErr := s.quarantineCreate(record, fmt.Errorf("persisted toolchain mount count does not match the creation plan"))
+			quarantined, quarantineErr := s.quarantineCreate(record, fmt.Errorf("persisted COW mount count does not match the creation plan"))
 			return quarantined, true, quarantineErr
 		}
 		activated, activateErr := toolchain.Activate(&plan.Toolchains, request.Workspace.Spec.Integrations.HostToolchains.RequireCOW)
 		if activateErr != nil {
-			quarantined, quarantineErr := s.quarantineCreate(record, fmt.Errorf("resume toolchain resources: %w", activateErr))
+			cleanupErr := toolchain.Deactivate(activated)
+			quarantined, quarantineErr := s.quarantineCreate(record, errors.Join(fmt.Errorf("resume COW resources: %w", activateErr), cleanupErr))
 			return quarantined, true, quarantineErr
 		}
 		record.Resources = append(record.Resources, activated...)
@@ -590,7 +591,7 @@ func (s *DockerService) prepareBootstrap(id, publicKeySource string, plan *Plan,
 			return runtime.Mount{}, err
 		}
 		hostPath, _ := s.root.HostPath(integrationDir)
-		plan.Mounts = append(plan.Mounts, runtime.Mount{Source: hostPath, Target: "/run/cohotfs/host", ReadOnly: true, Type: "bind", Propagation: "rprivate"})
+		plan.Mounts = append(plan.Mounts, runtime.Mount{Source: hostPath, Target: "/run/cohotfs/integrations", ReadOnly: true, Type: "bind", Propagation: "rprivate"})
 	}
 	seedFiles, err := integration.StageAgentSeeds(s.root, id, requestEnvironmentAgents(plan), environment)
 	if err != nil {

@@ -38,7 +38,7 @@ func buildShellCommand(deps Dependencies) *cobra.Command {
 	workspaceName := addWorkspaceFlag(command)
 	command.RunE = func(cmd *cobra.Command, _ []string) error {
 		return withSSHWorkspace(deps, cmd, *workspaceName, func(record state.Workspace, root *hostroot.Root) error {
-			return runOpenSSH(cmd.Context(), cmd, root, record, true, nil)
+			return runOpenSSH(cmd.Context(), cmd, root, record, sshRequestPTY, []string{"/bin/bash", "-l"})
 		})
 	}
 	return command
@@ -56,7 +56,7 @@ func buildExecCommand(deps Dependencies) *cobra.Command {
 			return apperr.New(apperr.ExitUsage, "usage", "exec requires a command")
 		}
 		return withSSHWorkspace(deps, cmd, *workspaceName, func(record state.Workspace, root *hostroot.Root) error {
-			return runOpenSSH(cmd.Context(), cmd, root, record, false, argv)
+			return runOpenSSH(cmd.Context(), cmd, root, record, sshNoPTY, argv)
 		})
 	}
 	return command
@@ -130,7 +130,7 @@ func buildAgentCommand(deps Dependencies) *cobra.Command {
 			}
 			remote = append(remote, "--", agent)
 			remote = append(remote, agentArgs...)
-			return runOpenSSH(cmd.Context(), cmd, root, record, false, remote)
+			return runOpenSSH(cmd.Context(), cmd, root, record, sshForcePTY, remote)
 		})
 	}
 	command.AddCommand(discover, run)
@@ -208,7 +208,28 @@ func openSSHBaseArguments(root *hostroot.Root, record state.Workspace) (string, 
 	return sshPath, arguments, nil
 }
 
-func runOpenSSH(ctx context.Context, cmd *cobra.Command, root *hostroot.Root, record state.Workspace, terminal bool, remote []string) error {
+type sshPTYMode uint8
+
+const (
+	sshNoPTY sshPTYMode = iota
+	sshRequestPTY
+	sshForcePTY
+)
+
+func appendSSHPTYArguments(arguments []string, mode sshPTYMode) ([]string, error) {
+	switch mode {
+	case sshNoPTY:
+		return append(arguments, "-T"), nil
+	case sshRequestPTY:
+		return append(arguments, "-t"), nil
+	case sshForcePTY:
+		return append(arguments, "-tt"), nil
+	default:
+		return nil, fmt.Errorf("invalid SSH PTY mode")
+	}
+}
+
+func runOpenSSH(ctx context.Context, cmd *cobra.Command, root *hostroot.Root, record state.Workspace, terminal sshPTYMode, remote []string) error {
 	sshPath, arguments, err := openSSHBaseArguments(root, record)
 	if err != nil {
 		return err
@@ -219,10 +240,9 @@ func runOpenSSH(ctx context.Context, cmd *cobra.Command, root *hostroot.Root, re
 		}
 		arguments = append(arguments, "-A")
 	}
-	if terminal {
-		arguments = append(arguments, "-t")
-	} else {
-		arguments = append(arguments, "-T")
+	arguments, err = appendSSHPTYArguments(arguments, terminal)
+	if err != nil {
+		return err
 	}
 	arguments = append(arguments, "agent@cohotfs-"+record.ID)
 	if len(remote) != 0 {

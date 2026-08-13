@@ -65,7 +65,7 @@ func (f *lifecycleBackend) Create(_ context.Context, spec runtime.WorkspaceSpec)
 func (f *lifecycleBackend) Start(_ context.Context, _ runtime.WorkspaceRef) error {
 	f.startCalls++
 	for _, declared := range f.created.Mounts {
-		if declared.Target != "/run/cohotfs/host/ssh" {
+		if declared.Target != "/run/cohotfs/transport/ssh" {
 			continue
 		}
 		socketPath := filepath.Join(declared.Source, "ssh.sock")
@@ -480,16 +480,17 @@ func TestDockerServiceAutomaticSetupModes(t *testing.T) {
 				t.Fatal(err)
 			}
 			source := t.TempDir()
-			if err := os.MkdirAll(filepath.Join(source, ".cohotfs"), 0o755); err != nil {
+			if err := os.MkdirAll(filepath.Join(source, "scripts"), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(source, ".cohotfs", "setup.sh"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+			if err := os.WriteFile(filepath.Join(source, "scripts", "cohotfs-setup.sh"), []byte("#!/bin/sh\n"), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			backend := &lifecycleBackend{}
 			service := NewDockerService(root, store, backend)
 			workspace := config.BuiltinWorkspace("api", "example.invalid/base:dev")
 			workspace.Spec.Setup.Mode = mode
+			workspace.Spec.Setup.Command = []string{"/bin/sh", "scripts/cohotfs-setup.sh"}
 			publicKey := filepath.Join(t.TempDir(), "id_ed25519.pub")
 			if err := os.WriteFile(publicKey, []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockMockMockMockMockMockMockMockMockMock test\n"), 0o644); err != nil {
 				t.Fatal(err)
@@ -530,15 +531,17 @@ func TestDockerServiceAutomaticSetupFailureStopsWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(source, ".cohotfs"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(source, "scripts"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(source, ".cohotfs", "setup.sh"), []byte("#!/bin/sh\nexit 9\n"), 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(source, "scripts", "cohotfs-setup.sh"), []byte("#!/bin/sh\nexit 9\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	backend := &lifecycleBackend{setupExitCode: 9}
 	service := NewDockerService(root, store, backend)
 	workspace := config.BuiltinWorkspace("api", "example.invalid/base:dev")
+	workspace.Spec.Setup.Mode = "once"
+	workspace.Spec.Setup.Command = []string{"/bin/sh", "scripts/cohotfs-setup.sh"}
 	publicKey := filepath.Join(t.TempDir(), "id_ed25519.pub")
 	if err := os.WriteFile(publicKey, []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockMockMockMockMockMockMockMockMockMock test\n"), 0o644); err != nil {
 		t.Fatal(err)

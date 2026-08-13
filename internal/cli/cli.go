@@ -3,7 +3,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,7 +11,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
-	"strings"
 
 	"github.com/gosuda/cohotfs/internal/apperr"
 	"github.com/gosuda/cohotfs/internal/config"
@@ -180,7 +178,7 @@ func newConfigCommand(deps Dependencies) *cobra.Command {
 			})
 		},
 	}
-	command.AddCommand(show, validate)
+	command.AddCommand(show, validate, buildProjectConfigCommand(deps))
 	return command
 }
 
@@ -195,63 +193,32 @@ func newInitCommand(deps Dependencies) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			canonical, digest, key, err := config.ProjectIdentity(cwd)
+			canonical, _, _, err := config.ProjectIdentity(cwd)
 			if err != nil {
 				return apperr.Wrap(apperr.ExitUsage, "project", err, "resolve project: %v", err)
 			}
-			name := strings.ToLower(filepath.Base(canonical))
-			name = strings.Trim(invalidName.ReplaceAllString(name, "-"), "-._")
-			if name == "" {
-				name = "workspace"
-			}
+			name := workspaceNameForPath(canonical)
 			workspace := config.BuiltinWorkspace(name, defaultImageReference())
+			workspace.Spec.Setup.Mode = "manual"
+			workspace.Spec.Setup.Command = []string{"/bin/true"}
 			workspace.Spec.Image.PullPolicy = defaultImagePullPolicy()
-			data, err := config.Render(workspace)
-			if err != nil {
-				return err
-			}
-			manifestDir := filepath.Join(canonical, ".cohotfs")
-			manifestPath := filepath.Join(manifestDir, "workspace.yaml")
-			if _, err := os.Lstat(manifestPath); err == nil {
-				return apperr.New(apperr.ExitStateConflict, "state_conflict", "%s already exists", manifestPath)
-			} else if !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-			if err := os.Mkdir(manifestDir, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
-				return err
-			}
-			file, err := os.OpenFile(manifestPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-			if err != nil {
-				return err
-			}
-			if _, err = file.Write(data); err == nil {
-				err = file.Sync()
-			}
-			closeErr := file.Close()
-			if err != nil {
-				_ = os.Remove(manifestPath)
-				return err
-			}
-			if closeErr != nil {
-				_ = os.Remove(manifestPath)
-				return closeErr
-			}
+			path := ""
 			if err := withRoot(deps, func(root *hostroot.Root) error {
-				dir := "projects/" + key
-				if err := root.EnsureDir(dir, 0o700); err != nil {
-					return err
-				}
-				override := map[string]any{"apiVersion": config.APIVersion, "kind": "ProjectOverride", "sourcePath": canonical, "sourceDigest": digest}
-				raw, err := json.MarshalIndent(override, "", "  ")
+				_, existingPath, err := projectConfigPath(root, canonical)
 				if err != nil {
 					return err
 				}
-				return root.AtomicWrite(dir+"/override.yaml", append(raw, '\n'), 0o600)
+				if _, err := os.Lstat(existingPath); err == nil {
+					return apperr.New(apperr.ExitStateConflict, "state_conflict", "%s already exists", existingPath)
+				} else if !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+				path, err = writeProjectDocument(root, canonical, workspace)
+				return err
 			}); err != nil {
-				_ = os.Remove(manifestPath)
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "created %s\nrun: cohotfs workspace create\n", manifestPath)
+			fmt.Fprintf(cmd.OutOrStdout(), "created %s\nrun: cohotfs config project edit\nrun: cohotfs workspace create\n", path)
 			return nil
 		},
 	}

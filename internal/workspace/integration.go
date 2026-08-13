@@ -10,7 +10,7 @@ type containerSeedManifest struct {
 
 func requestEnvironmentAgents(plan *Plan) config.AgentsSpec {
 	return config.AgentsSpec{
-		OMP:    config.AgentSpec{Enabled: plan.Integrations["agent:omp"], Config: "seed"},
+		OMP:    config.OMPAgentSpec{Enabled: plan.Integrations["agent:omp"], Config: "seed"},
 		Codex:  config.AgentSpec{Enabled: plan.Integrations["agent:codex"], Config: "seed"},
 		Claude: config.AgentSpec{Enabled: plan.Integrations["agent:claude"], Config: "seed"},
 	}
