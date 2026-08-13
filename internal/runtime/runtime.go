@@ -83,6 +83,11 @@ type ResourceLimits struct {
 	NofileHard      uint64
 }
 
+const (
+	GVisorHostUDSCreate = "create"
+	GVisorHostUDSAll    = "all"
+)
+
 type WorkspaceSpec struct {
 	WorkspaceID    string
 	OwnerUID       int
@@ -91,6 +96,7 @@ type WorkspaceSpec struct {
 	CreationNonce  string
 	Image          ResolvedImage
 	Runtime        string
+	GVisorHostUDS  string
 	Command        []string
 	Environment    []string
 	Mounts         []Mount
@@ -151,6 +157,11 @@ func ValidateWorkspaceSpec(spec WorkspaceSpec) error {
 		resources := spec.Resources
 		if resources.NanoCPUs <= 0 || resources.MemoryBytes <= 0 || resources.MemorySwapBytes < resources.MemoryBytes || resources.PIDs <= 0 || resources.NofileSoft == 0 || resources.NofileHard == 0 || resources.NofileSoft > resources.NofileHard || resources.NofileSoft > math.MaxInt64 || resources.NofileHard > math.MaxInt64 {
 			return fmt.Errorf("invalid resource limits")
+		}
+	}
+	if spec.GVisorHostUDS != "" {
+		if spec.Runtime == "" || spec.GVisorHostUDS != GVisorHostUDSCreate && spec.GVisorHostUDS != GVisorHostUDSAll {
+			return fmt.Errorf("invalid gVisor host UDS policy")
 		}
 	}
 	for key, value := range map[string]string{

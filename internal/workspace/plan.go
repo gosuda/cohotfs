@@ -158,9 +158,21 @@ func (p Plan) RuntimeSpec(bootstrapMount runtime.Mount) runtime.WorkspaceSpec {
 	return runtime.WorkspaceSpec{
 		WorkspaceID: p.WorkspaceID, OwnerUID: p.OwnerUID, OwnerGID: p.OwnerGID,
 		ManifestDigest: p.ManifestDigest, CreationNonce: p.CreationNonce, Image: p.Image,
-		Runtime: p.RuntimeAlias, Environment: environment, Mounts: mounts,
-		Resources: p.Resources, Labels: labels,
+		Runtime: p.RuntimeAlias, GVisorHostUDS: p.gvisorHostUDSPolicy(),
+		Environment: environment, Mounts: mounts, Resources: p.Resources, Labels: labels,
 	}
+}
+
+func (p Plan) gvisorHostUDSPolicy() string {
+	if p.RuntimeAlias == "" {
+		return ""
+	}
+	for _, integration := range []string{"browser", "sshAgent", "gitCredentials", "agent:omp", "agent:codex", "agent:claude"} {
+		if p.Integrations[integration] {
+			return runtime.GVisorHostUDSAll
+		}
+	}
+	return runtime.GVisorHostUDSCreate
 }
 
 func runtimeEnvironment(base, toolchains, omp []string) []string {

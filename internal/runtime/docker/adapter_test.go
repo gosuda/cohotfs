@@ -211,8 +211,36 @@ func TestCreateSelectsConfiguredRuntime(t *testing.T) {
 	if capture.HostConfig == nil || capture.HostConfig.Runtime != "runsc" {
 		t.Fatalf("runtime = %#v", capture.HostConfig)
 	}
-	if got := capture.HostConfig.Annotations["dev.gvisor.flag.host-uds"]; got != "create" {
+	if len(capture.HostConfig.Annotations) != 0 {
+		t.Fatalf("custom runtime annotations = %#v", capture.HostConfig.Annotations)
+	}
+}
+
+func TestCreateAppliesExplicitGVisorHostUDSPolicy(t *testing.T) {
+	var capture capturedCreate
+	adapter := testAdapter(t, &capture, `{"runsc":{"path":"runsc"}}`)
+	spec := validSpec()
+	spec.Runtime = "runsc"
+	spec.GVisorHostUDS = runtime.GVisorHostUDSAll
+	if _, err := adapter.Create(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	if got := capture.HostConfig.Annotations["dev.gvisor.flag.host-uds"]; got != "all" {
 		t.Fatalf("gVisor host UDS annotation = %q", got)
+	}
+}
+
+func TestCreateRejectsInvalidGVisorHostUDSPolicy(t *testing.T) {
+	var capture capturedCreate
+	adapter := testAdapter(t, &capture, `{"runsc":{"path":"runsc"}}`)
+	spec := validSpec()
+	spec.Runtime = "runsc"
+	spec.GVisorHostUDS = "open"
+	if _, err := adapter.Create(context.Background(), spec); err == nil {
+		t.Fatal("accepted incomplete gVisor host UDS policy")
+	}
+	if capture.Config.Image != "" {
+		t.Fatal("created container after gVisor policy failure")
 	}
 }
 

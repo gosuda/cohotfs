@@ -186,8 +186,8 @@ func (a *Adapter) Create(ctx context.Context, spec runtime.WorkspaceSpec) (runti
 	hostConfig := &container.HostConfig{
 		NetworkMode: "bridge", Privileged: false, SecurityOpt: []string{"no-new-privileges:true"}, Runtime: spec.Runtime,
 	}
-	if spec.Runtime != "" {
-		hostConfig.Annotations = map[string]string{"dev.gvisor.flag.host-uds": "create"}
+	if spec.GVisorHostUDS != "" {
+		hostConfig.Annotations = map[string]string{"dev.gvisor.flag.host-uds": spec.GVisorHostUDS}
 	}
 	for _, declared := range spec.Mounts {
 		configured := mount.Mount{Target: declared.Target, ReadOnly: declared.ReadOnly}

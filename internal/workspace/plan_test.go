@@ -76,6 +76,32 @@ func TestCompilePlanDetectsRegisteredGVisorAlias(t *testing.T) {
 	}
 }
 
+func TestRuntimeSpecScopesGVisorHostUDSPolicy(t *testing.T) {
+	workspace := config.BuiltinWorkspace("api", "example.invalid/base:dev")
+	workspace.Spec.Runtime.Isolation = "gvisor"
+	workspace.Spec.Integrations.Agents.OMP.Enabled = true
+	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI}
+	backend := availableDocker()
+	backend.Runtimes = []string{"runc", "runsc"}
+	plan, err := CompilePlan(workspace, "workspace", 1000, 1000, t.TempDir(), "manifest", image, "", "/tmp/ssh.sock", backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := plan.RuntimeSpec(runtime.Mount{}).GVisorHostUDS; got != runtime.GVisorHostUDSAll {
+		t.Fatalf("gVisor agent integration host UDS policy = %q", got)
+	}
+	for _, integration := range []string{"browser", "sshAgent", "gitCredentials", "agent:omp", "agent:codex", "agent:claude"} {
+		plan.Integrations[integration] = false
+	}
+	if got := plan.RuntimeSpec(runtime.Mount{}).GVisorHostUDS; got != runtime.GVisorHostUDSCreate {
+		t.Fatalf("gVisor SSH-only host UDS policy = %q", got)
+	}
+	plan.RuntimeAlias = ""
+	if got := plan.RuntimeSpec(runtime.Mount{}).GVisorHostUDS; got != "" {
+		t.Fatalf("standard runtime host UDS policy = %q", got)
+	}
+}
+
 func TestRuntimeSpecContainsIdentityLabelsAndBootstrap(t *testing.T) {
 	workspace := config.BuiltinWorkspace("api", "example.invalid/base:dev")
 	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI}
