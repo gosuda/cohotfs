@@ -34,7 +34,7 @@ func (s *DockerService) loadPlan(id string) (Plan, error) {
 		return Plan{}, err
 	}
 	var plan Plan
-	if err := json.Unmarshal(raw, &plan); err != nil || plan.SchemaVersion != 1 || plan.WorkspaceID != id {
+	if err := json.Unmarshal(raw, &plan); err != nil || plan.SchemaVersion != state.WorkspacePlanSchemaVersion || plan.WorkspaceID != id {
 		return Plan{}, fmt.Errorf("workspace plan identity is invalid")
 	}
 	return plan, nil

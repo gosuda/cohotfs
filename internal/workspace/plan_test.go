@@ -9,6 +9,7 @@ import (
 	"github.com/gosuda/cohotfs/internal/config"
 	"github.com/gosuda/cohotfs/internal/containeragent"
 	"github.com/gosuda/cohotfs/internal/runtime"
+	"github.com/gosuda/cohotfs/internal/state"
 )
 
 func availableDocker() runtime.BackendInfo {
@@ -22,7 +23,7 @@ func TestCompilePlanDefaultsAndResources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Resources.Enabled || plan.SSH.Kind != "directory-uds" || plan.Mounts[0].ReadOnly || plan.RuntimeAlias != "" {
+	if plan.SchemaVersion != state.WorkspacePlanSchemaVersion || plan.Resources.Enabled || plan.SSH.Kind != "directory-uds" || plan.Mounts[0].ReadOnly || plan.RuntimeAlias != "" {
 		t.Fatalf("default plan = %#v", plan)
 	}
 	workspace.Spec.Resources.Enabled = true
@@ -86,6 +87,22 @@ func TestCompilePlanMasksExistingReservedDirectories(t *testing.T) {
 			t.Fatalf("existing reserved directory %s is not masked: %#v", name, plan.Mounts)
 		}
 	}
+	if len(plan.ReservedMasks) != 2 {
+		t.Fatalf("reserved mask identities = %#v", plan.ReservedMasks)
+	}
+	for _, identity := range plan.ReservedMasks {
+		info, err := os.Lstat(filepath.Join(source, identity.Name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		current, err := reservedWorkspaceMaskIdentity(identity.Name, info)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if identity != current {
+			t.Fatalf("persisted identity = %#v, current = %#v", identity, current)
+		}
+	}
 }
 
 func TestCompilePlanRejectsUnsafeReservedPath(t *testing.T) {
@@ -127,11 +144,31 @@ func TestValidateReservedWorkspaceMasksRejectsSourceChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(source, ".cohotfs", "host-state"), []byte("updated"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateReservedWorkspaceMasks(plan); err != nil {
+		t.Fatalf("reserved directory content change invalidated identity: %v", err)
+	}
+	legacyPlan := plan
+	legacyPlan.ReservedMasks = nil
+	if err := validateReservedWorkspaceMasks(legacyPlan); err == nil || !strings.Contains(err.Error(), "identity is unavailable") {
+		t.Fatalf("missing reserved identity validation error = %v", err)
+	}
+	if err := os.Remove(filepath.Join(source, ".cohotfs", "host-state")); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Remove(filepath.Join(source, ".cohotfs")); err != nil {
 		t.Fatal(err)
 	}
 	if err := validateReservedWorkspaceMasks(plan); err == nil || !strings.Contains(err.Error(), "changed after plan compilation") {
 		t.Fatalf("removed reserved path validation error = %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(source, ".cohotfs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateReservedWorkspaceMasks(plan); err == nil || !strings.Contains(err.Error(), "changed after plan compilation") {
+		t.Fatalf("replaced reserved path validation error = %v", err)
 	}
 }
 

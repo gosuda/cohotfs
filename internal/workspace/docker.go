@@ -469,7 +469,7 @@ func (s *DockerService) validateCreatingBootstrap(request CreateRequest, record 
 }
 
 func creatingPlanMatches(request CreateRequest, record state.Workspace, plan Plan) bool {
-	return plan.SchemaVersion == 1 && plan.WorkspaceID == record.ID && plan.Name == record.Name &&
+	return plan.SchemaVersion == state.WorkspacePlanSchemaVersion && plan.WorkspaceID == record.ID && plan.Name == record.Name &&
 		plan.OwnerUID == record.OwnerUID && plan.OwnerGID == record.OwnerGID &&
 		plan.CanonicalSource == record.CanonicalSource && plan.ManifestDigest == record.ManifestDigest &&
 		plan.Backend == record.Backend && plan.Image.Digest == record.ImageDigest &&
@@ -489,9 +489,11 @@ func activeMountResources(resources []state.ExternalResource) []state.ExternalRe
 }
 
 func (s *DockerService) createRuntimeLocked(ctx context.Context, record state.Workspace, plan Plan, bootstrapMount runtime.Mount) (state.Workspace, error) {
-	if err := validateReservedWorkspaceMasks(plan); err != nil {
+	releasePins, err := pinReservedWorkspaceMasks(plan)
+	if err != nil {
 		return s.failCreate(record, activeMountResources(record.Resources), err)
 	}
+	defer func() { releasePins() }()
 	runtimeSpec := plan.RuntimeSpec(bootstrapMount)
 	runtimeSpec.Record = func(ref runtime.WorkspaceRef) error {
 		record.RuntimeRef = ref
@@ -508,6 +510,16 @@ func (s *DockerService) createRuntimeLocked(ctx context.Context, record state.Wo
 		return s.failCreate(record, activeMountResources(record.Resources), err)
 	}
 	record.RuntimeRef = ref
+	if err := validateReservedWorkspaceMasks(plan); err != nil {
+		deleteErr := s.backend.Delete(context.WithoutCancel(ctx), ref)
+		if deleteErr != nil {
+			return s.quarantineCreate(record, errors.Join(err, deleteErr))
+		}
+		record.RuntimeRef = runtime.WorkspaceRef{}
+		return s.failCreate(record, activeMountResources(record.Resources), err)
+	}
+	releasePins()
+	releasePins = func() {}
 	if err := s.store.SaveWorkspace(record); err != nil {
 		deleteErr := s.backend.Delete(context.WithoutCancel(ctx), ref)
 		if deleteErr != nil {
@@ -691,9 +703,11 @@ func (s *DockerService) startLocked(ctx context.Context, record state.Workspace)
 	if err != nil {
 		return record, err
 	}
-	if err := validateReservedWorkspaceMasks(plan); err != nil {
+	releasePins, err := pinReservedWorkspaceMasks(plan)
+	if err != nil {
 		return record, err
 	}
+	defer func() { releasePins() }()
 	if err := s.acquireIntegrationLeases(ctx, &record, plan); err != nil {
 		return record, fmt.Errorf("acquire host integrations: %w", err)
 	}
@@ -707,21 +721,25 @@ func (s *DockerService) startLocked(ctx context.Context, record state.Workspace)
 			return record, err
 		}
 	}
-	if !status.Running {
-		if err := s.backend.Start(ctx, record.RuntimeRef); err != nil {
-			cleanupErr := s.releaseActiveIntegrationLeases(ctx, &record)
-			_ = record.Transition(state.StatusError, s.now())
-			_ = s.store.SaveWorkspace(record)
-			return record, errors.Join(err, cleanupErr)
-		}
-	}
 	failStarted := func(cause error) (state.Workspace, error) {
-		stopErr := s.backend.Stop(ctx, record.RuntimeRef, 10*time.Second)
-		leaseErr := s.releaseActiveIntegrationLeases(ctx, &record)
+		cleanupCtx := context.WithoutCancel(ctx)
+		stopErr := s.backend.Stop(cleanupCtx, record.RuntimeRef, 10*time.Second)
+		leaseErr := s.releaseActiveIntegrationLeases(cleanupCtx, &record)
 		_ = record.Transition(state.StatusError, s.now())
 		_ = s.store.SaveWorkspace(record)
 		return record, errors.Join(cause, stopErr, leaseErr)
 	}
+	if !status.Running {
+		if err := s.backend.Start(ctx, record.RuntimeRef); err != nil {
+			maskErr := validateReservedWorkspaceMasks(plan)
+			return failStarted(errors.Join(err, maskErr))
+		}
+	}
+	if err := validateReservedWorkspaceMasks(plan); err != nil {
+		return failStarted(err)
+	}
+	releasePins()
+	releasePins = func() {}
 	ready, err := s.waitForContainerReady(ctx, record.RuntimeRef)
 	if err != nil {
 		return failStarted(err)
@@ -889,10 +907,28 @@ func (s *DockerService) rotateSSHHostKeyLocked(ctx context.Context, record state
 }
 
 func (s *DockerService) cleanupPersistentSystem(ctx context.Context, record state.Workspace, running bool) error {
+	cleanupCtx := context.WithoutCancel(ctx)
 	if !running {
-		if err := s.backend.Start(ctx, record.RuntimeRef); err != nil {
-			return fmt.Errorf("start workspace for system cleanup: %w", err)
+		plan, err := s.loadPlan(record.ID)
+		if err != nil {
+			return err
 		}
+		releasePins, err := pinReservedWorkspaceMasks(plan)
+		if err != nil {
+			return err
+		}
+		defer func() { releasePins() }()
+		if err := s.backend.Start(ctx, record.RuntimeRef); err != nil {
+			maskErr := validateReservedWorkspaceMasks(plan)
+			stopErr := s.backend.Stop(cleanupCtx, record.RuntimeRef, 10*time.Second)
+			return errors.Join(fmt.Errorf("start workspace for system cleanup: %w", err), maskErr, stopErr)
+		}
+		if err := validateReservedWorkspaceMasks(plan); err != nil {
+			stopErr := s.backend.Stop(cleanupCtx, record.RuntimeRef, 10*time.Second)
+			return errors.Join(err, stopErr)
+		}
+		releasePins()
+		releasePins = func() {}
 	}
 	cleanupErr := func() error {
 		ready, err := s.waitForContainerReady(ctx, record.RuntimeRef)
@@ -916,7 +952,7 @@ func (s *DockerService) cleanupPersistentSystem(ctx context.Context, record stat
 		}
 		return nil
 	}()
-	stopErr := s.backend.Stop(context.WithoutCancel(ctx), record.RuntimeRef, 10*time.Second)
+	stopErr := s.backend.Stop(cleanupCtx, record.RuntimeRef, 10*time.Second)
 	return errors.Join(cleanupErr, stopErr)
 }
 

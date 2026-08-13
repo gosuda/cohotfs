@@ -36,6 +36,7 @@ type lifecycleBackend struct {
 	startCalls       int
 	stopped          bool
 	deleted          bool
+	stopContextErr   error
 	deleteCalls      int
 	hostKeyReads     int
 	hostKeyFailures  int
@@ -46,6 +47,8 @@ type lifecycleBackend struct {
 	setupCalls       int
 	setupExitCode    int
 	hostKey          []byte
+	onCreate         func(runtime.WorkspaceSpec) error
+	onStart          func() error
 	onDelete         func() error
 	socketListeners  []*net.UnixListener
 }
@@ -59,11 +62,21 @@ func (f *lifecycleBackend) Pull(context.Context, runtime.PullRequest) (runtime.R
 func (f *lifecycleBackend) Create(_ context.Context, spec runtime.WorkspaceSpec) (runtime.WorkspaceRef, error) {
 	f.createCalls++
 	f.created = spec
+	if f.onCreate != nil {
+		if err := f.onCreate(spec); err != nil {
+			return runtime.WorkspaceRef{}, err
+		}
+	}
 	f.ref = runtime.WorkspaceRef{Backend: "docker", IDs: map[string]string{"container": "container"}, Nonce: spec.CreationNonce}
 	f.status = runtime.WorkspaceStatus{Exists: true, Labels: spec.Labels}
 	return f.ref, nil
 }
 func (f *lifecycleBackend) Start(_ context.Context, _ runtime.WorkspaceRef) error {
+	if f.onStart != nil {
+		if err := f.onStart(); err != nil {
+			return err
+		}
+	}
 	f.startCalls++
 	for _, declared := range f.created.Mounts {
 		if declared.Target != "/run/cohotfs/transport/ssh" {
@@ -157,7 +170,8 @@ func (f *lifecycleBackend) ExecSync(_ context.Context, _ runtime.WorkspaceRef, r
 func (f *lifecycleBackend) Inspect(context.Context, runtime.WorkspaceRef) (runtime.WorkspaceStatus, error) {
 	return f.status, nil
 }
-func (f *lifecycleBackend) Stop(context.Context, runtime.WorkspaceRef, time.Duration) error {
+func (f *lifecycleBackend) Stop(ctx context.Context, _ runtime.WorkspaceRef, _ time.Duration) error {
+	f.stopContextErr = ctx.Err()
 	f.stopped = true
 	f.status.Running = false
 	for _, listener := range f.socketListeners {
@@ -287,12 +301,116 @@ func TestDockerServiceCreateStartStopRemove(t *testing.T) {
 	}
 }
 
-func TestCreateRuntimeRejectsReservedPathRemovedAfterPlanCompilation(t *testing.T) {
+func TestLoadPlanRejectsLegacySchema(t *testing.T) {
 	root, err := hostroot.OpenForTest(filepath.Join(t.TempDir(), "root"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer root.Close()
+	store, err := state.NewStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := state.NewWorkspaceID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte(fmt.Sprintf(`{"schemaVersion":1,"workspaceID":%q}`, id))
+	if err := store.SaveWorkspaceArtifact(id, "plan.json", raw); err != nil {
+		t.Fatal(err)
+	}
+	service := NewDockerService(root, store, &lifecycleBackend{})
+	if _, err := service.loadPlan(id); err == nil || !strings.Contains(err.Error(), "plan identity is invalid") {
+		t.Fatalf("legacy plan load error = %v", err)
+	}
+}
+
+func TestCreateRuntimeRejectsReservedPathChangesAtCreateBoundary(t *testing.T) {
+	for _, testCase := range []struct {
+		name            string
+		replaceOnCreate bool
+		wantCreateCalls int
+		wantDeleteCalls int
+	}{
+		{name: "removed-before-create"},
+		{name: "replaced-during-create", replaceOnCreate: true, wantCreateCalls: 1, wantDeleteCalls: 1},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			root, err := hostroot.OpenForTest(filepath.Join(t.TempDir(), "root"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			store, err := state.NewStore(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			source := t.TempDir()
+			reserved := filepath.Join(source, ".omp")
+			if err := os.Mkdir(reserved, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			workspace := config.BuiltinWorkspace("api", "example.invalid/base:dev")
+			image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI}
+			id, err := state.NewWorkspaceID()
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := CompilePlan(workspace, id, 1000, 1000, source, "manifest", image, "", testSSHSocket(t), availableDocker())
+			if err != nil {
+				t.Fatal(err)
+			}
+			backend := &lifecycleBackend{}
+			if testCase.replaceOnCreate {
+				backend.onCreate = func(runtime.WorkspaceSpec) error {
+					if err := os.Remove(reserved); err != nil {
+						return err
+					}
+					return os.Mkdir(reserved, 0o700)
+				}
+			} else if err := os.Remove(reserved); err != nil {
+				t.Fatal(err)
+			}
+			record := state.Workspace{
+				ID: id, Name: plan.Name, OwnerUID: plan.OwnerUID, OwnerGID: plan.OwnerGID,
+				CanonicalSource: plan.CanonicalSource, ManifestDigest: plan.ManifestDigest, Backend: plan.Backend,
+				ImageDigest: plan.Image.Digest, BootstrapAPI: plan.Image.BootstrapAPI,
+				ContainerUID: plan.ContainerUID, ContainerGID: plan.ContainerGID,
+				Status: state.StatusCreating, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+			}
+			if err := store.SaveWorkspace(record); err != nil {
+				t.Fatal(err)
+			}
+			service := NewDockerService(root, store, backend)
+			failed, err := service.createRuntimeLocked(context.Background(), record, plan, runtime.Mount{})
+			if err == nil || !strings.Contains(err.Error(), "changed after plan compilation") {
+				t.Fatalf("create runtime error = %v", err)
+			}
+			if backend.createCalls != testCase.wantCreateCalls || backend.deleteCalls != testCase.wantDeleteCalls {
+				t.Fatalf("runtime calls create=%d delete=%d, want create=%d delete=%d", backend.createCalls, backend.deleteCalls, testCase.wantCreateCalls, testCase.wantDeleteCalls)
+			}
+			persisted, loadErr := store.LoadWorkspace(id)
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			if failed.Status != state.StatusError || persisted.Status != state.StatusError || failed.RuntimeRef.Backend != "" || persisted.RuntimeRef.Backend != "" {
+				t.Fatalf("failed create state returned=%#v persisted=%#v", failed, persisted)
+			}
+		})
+	}
+}
+
+func newStoppedMaskedWorkspace(t *testing.T) (*DockerService, *lifecycleBackend, state.Workspace, string) {
+	t.Helper()
+	root, err := hostroot.OpenForTest(filepath.Join(t.TempDir(), "root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := root.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	store, err := state.NewStore(root)
 	if err != nil {
 		t.Fatal(err)
@@ -303,36 +421,115 @@ func TestCreateRuntimeRejectsReservedPathRemovedAfterPlanCompilation(t *testing.
 		t.Fatal(err)
 	}
 	workspace := config.BuiltinWorkspace("api", "example.invalid/base:dev")
-	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI}
-	id, err := state.NewWorkspaceID()
-	if err != nil {
-		t.Fatal(err)
-	}
-	plan, err := CompilePlan(workspace, id, 1000, 1000, source, "manifest", image, "", testSSHSocket(t), availableDocker())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(reserved); err != nil {
-		t.Fatal(err)
-	}
-	record := state.Workspace{
-		ID: id, Name: plan.Name, OwnerUID: plan.OwnerUID, OwnerGID: plan.OwnerGID,
-		CanonicalSource: plan.CanonicalSource, ManifestDigest: plan.ManifestDigest, Backend: plan.Backend,
-		ImageDigest: plan.Image.Digest, BootstrapAPI: plan.Image.BootstrapAPI,
-		ContainerUID: plan.ContainerUID, ContainerGID: plan.ContainerGID,
-		Status: state.StatusCreating, CreatedAt: time.Now(), UpdatedAt: time.Now(),
-	}
-	if err := store.SaveWorkspace(record); err != nil {
+	workspace.Spec.Setup.Mode = "manual"
+	publicKey := filepath.Join(t.TempDir(), "id_ed25519.pub")
+	if err := os.WriteFile(publicKey, []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockMockMockMockMockMockMockMockMockMock test\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	backend := &lifecycleBackend{}
 	service := NewDockerService(root, store, backend)
-	_, err = service.createRuntimeLocked(context.Background(), record, plan, runtime.Mount{})
-	if err == nil || !strings.Contains(err.Error(), "changed after plan compilation") {
-		t.Fatalf("create runtime error = %v", err)
+	record, err := service.Create(context.Background(), CreateRequest{
+		OperationKey: t.Name() + "/create", Workspace: workspace, CanonicalSource: source,
+		ManifestDigest: "manifest", OwnerUID: 1000, OwnerGID: 1000,
+		Image:       runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI},
+		BackendInfo: availableDocker(), SSHSocketPath: testSSHSocket(t), BootstrapSource: publicKey,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if backend.createCalls != 0 {
-		t.Fatalf("runtime create called with stale reserved mask: %d", backend.createCalls)
+	return service, backend, record, reserved
+}
+
+func assertPersistedWorkspaceError(t *testing.T, service *DockerService, id string) {
+	t.Helper()
+	persisted, err := service.store.LoadWorkspace(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Status != state.StatusError {
+		t.Fatalf("persisted workspace status = %s", persisted.Status)
+	}
+}
+
+func TestStartStopsRuntimeWhenReservedPathChangesDuringStart(t *testing.T) {
+	service, backend, record, reserved := newStoppedMaskedWorkspace(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	backend.onStart = func() error {
+		if err := os.Remove(reserved); err != nil {
+			return err
+		}
+		if err := os.Mkdir(reserved, 0o700); err != nil {
+			return err
+		}
+		cancel()
+		return nil
+	}
+	record, err := service.Start(ctx, record.ID, t.Name()+"/start")
+	if err == nil || !strings.Contains(err.Error(), "changed after plan compilation") {
+		t.Fatalf("start error = %v", err)
+	}
+	if !backend.stopped || backend.stopContextErr != nil || backend.readyReads != 0 || record.Status != state.StatusError {
+		t.Fatalf("failed start cleanup: stopped=%v stopCtx=%v readyReads=%d status=%s", backend.stopped, backend.stopContextErr, backend.readyReads, record.Status)
+	}
+	assertPersistedWorkspaceError(t, service, record.ID)
+}
+
+func TestStartErrorUsesFailureCleanup(t *testing.T) {
+	service, backend, record, reserved := newStoppedMaskedWorkspace(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	backend.onStart = func() error {
+		if err := os.Remove(reserved); err != nil {
+			return err
+		}
+		if err := os.Mkdir(reserved, 0o700); err != nil {
+			return err
+		}
+		cancel()
+		return errors.New("injected start failure")
+	}
+	record, err := service.Start(ctx, record.ID, t.Name()+"/start")
+	if err == nil || !strings.Contains(err.Error(), "injected start failure") || !strings.Contains(err.Error(), "changed after plan compilation") {
+		t.Fatalf("start error = %v", err)
+	}
+	if !backend.stopped || backend.stopContextErr != nil || backend.readyReads != 0 || record.Status != state.StatusError {
+		t.Fatalf("start failure cleanup: stopped=%v stopCtx=%v readyReads=%d status=%s", backend.stopped, backend.stopContextErr, backend.readyReads, record.Status)
+	}
+	assertPersistedWorkspaceError(t, service, record.ID)
+}
+
+func TestCleanupPersistentSystemPinsReservedPathsAcrossStart(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		startError bool
+	}{
+		{name: "start-succeeds"},
+		{name: "start-fails", startError: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			service, backend, record, reserved := newStoppedMaskedWorkspace(t)
+			backend.onStart = func() error {
+				if err := os.Remove(reserved); err != nil {
+					return err
+				}
+				if err := os.Mkdir(reserved, 0o700); err != nil {
+					return err
+				}
+				if testCase.startError {
+					return errors.New("injected cleanup start failure")
+				}
+				return nil
+			}
+			err := service.cleanupPersistentSystem(context.Background(), record, false)
+			if err == nil || !strings.Contains(err.Error(), "changed after plan compilation") {
+				t.Fatalf("system cleanup error = %v", err)
+			}
+			if testCase.startError && !strings.Contains(err.Error(), "injected cleanup start failure") {
+				t.Fatalf("system cleanup start error = %v", err)
+			}
+			if !backend.stopped || backend.readyReads != 0 {
+				t.Fatalf("system cleanup runtime state: stopped=%v readyReads=%d", backend.stopped, backend.readyReads)
+			}
+		})
 	}
 }
 

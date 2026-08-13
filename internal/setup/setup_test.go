@@ -195,7 +195,7 @@ func TestServicePassesOnlyPlanToolchainEnvironment(t *testing.T) {
 		WorkspaceID   string         `json:"workspaceID"`
 		Toolchains    toolchain.Plan `json:"toolchains"`
 	}{
-		SchemaVersion: 1, WorkspaceID: id,
+		SchemaVersion: state.WorkspacePlanSchemaVersion, WorkspaceID: id,
 		Toolchains: toolchain.Plan{Environment: []string{
 			"COHOTFS_MANAGED_TOOLCHAINS=1", "PATH=" + path,
 			"GOROOT=/cohotfs/toolchains/go/root", "OPENAI_API_KEY=secret",

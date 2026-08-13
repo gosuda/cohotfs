@@ -121,6 +121,38 @@ func TestWorkspaceEndToEnd(t *testing.T) {
 		harness.remove(t, record)
 	})
 
+	t.Run("existing-reserved-directory-mask", func(t *testing.T) {
+		var before os.FileInfo
+		options := workspaceCreateOptions{prepareSource: func(source string) {
+			reserved := filepath.Join(source, ".omp")
+			if err := os.Mkdir(reserved, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(reserved, "host-sentinel"), []byte("host-only\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			before, err = os.Lstat(reserved)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}}
+		record, _, source := harness.createWorkspaceWithOptions(t, "it-reserved-mask", "manual", true, config.ResourceSpec{}, options)
+		record = harness.start(t, record)
+		after, err := os.Lstat(filepath.Join(source, ".omp"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !os.SameFile(before, after) {
+			t.Fatal("Docker replaced the host reserved directory")
+		}
+		assertFile(t, filepath.Join(source, ".omp", "host-sentinel"), "host-only\n")
+		stdout, stderr := harness.ssh(t, record, nil, `test -d /workspace/.omp && test ! -e /workspace/.omp/host-sentinel && printf 'reserved-mask-ok\n'`)
+		if string(stdout) != "reserved-mask-ok\n" || len(stderr) != 0 {
+			t.Fatalf("reserved mask stdout=%q stderr=%q", stdout, stderr)
+		}
+		harness.remove(t, record)
+	})
 	t.Run("go-toolchain-with-omp-oauth", func(t *testing.T) {
 		ompRoot := filepath.Join(harness.home, "omp-fixture")
 		ompAgent := filepath.Join(ompRoot, "agent")
@@ -453,6 +485,7 @@ type workspaceCreateOptions struct {
 	toolchainCandidates []toolchain.Candidate
 	permittedRoots      []string
 	ompSources          ompimport.Sources
+	prepareSource       func(string)
 }
 
 func (h *harness) createWorkspace(t *testing.T, name, mode string, directorySocket bool, resources config.ResourceSpec) (state.Workspace, config.Workspace, string) {
@@ -475,6 +508,9 @@ printf 'ok\n' > /workspace/setup-result
 `
 	if err := os.WriteFile(filepath.Join(source, "scripts", "cohotfs-setup.sh"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
+	}
+	if options.prepareSource != nil {
+		options.prepareSource(source)
 	}
 	workspace := config.BuiltinWorkspace(name, h.tag)
 	workspace.Spec.Setup.Mode = mode

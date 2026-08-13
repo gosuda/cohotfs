@@ -21,7 +21,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const SchemaVersion = 1
+const (
+	SchemaVersion              = 1
+	WorkspacePlanSchemaVersion = 2
+)
 
 type Status string
 

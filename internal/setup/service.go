@@ -124,7 +124,7 @@ func (s *Service) setupToolchainEnvironment(workspaceID string) ([]string, error
 	if err := json.Unmarshal(raw, &plan); err != nil {
 		return nil, fmt.Errorf("decode workspace plan for setup: %w", err)
 	}
-	if plan.SchemaVersion != 1 || plan.WorkspaceID != workspaceID {
+	if plan.SchemaVersion != state.WorkspacePlanSchemaVersion || plan.WorkspaceID != workspaceID {
 		return nil, fmt.Errorf("workspace plan identity is invalid")
 	}
 	environment, err := toolchain.SetupEnvironment(plan.Toolchains.Environment)
