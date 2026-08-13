@@ -88,6 +88,9 @@ func TestCreateDefaultSecurityAndNoResourceLimits(t *testing.T) {
 	if len(capture.HostConfig.SecurityOpt) != 1 || capture.HostConfig.SecurityOpt[0] != "no-new-privileges:true" {
 		t.Fatalf("security opts = %v", capture.HostConfig.SecurityOpt)
 	}
+	if len(capture.HostConfig.Annotations) != 0 {
+		t.Fatalf("standard runtime annotations = %#v", capture.HostConfig.Annotations)
+	}
 	resources := capture.HostConfig.Resources
 	if resources.NanoCPUs != 0 || resources.Memory != 0 || resources.MemorySwap != 0 || resources.PidsLimit != nil || len(resources.Ulimits) != 0 {
 		t.Fatalf("default resources are constrained: %#v", resources)
@@ -207,6 +210,9 @@ func TestCreateSelectsConfiguredRuntime(t *testing.T) {
 	}
 	if capture.HostConfig == nil || capture.HostConfig.Runtime != "runsc" {
 		t.Fatalf("runtime = %#v", capture.HostConfig)
+	}
+	if got := capture.HostConfig.Annotations["dev.gvisor.flag.host-uds"]; got != "create" {
+		t.Fatalf("gVisor host UDS annotation = %q", got)
 	}
 }
 
