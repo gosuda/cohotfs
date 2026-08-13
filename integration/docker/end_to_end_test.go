@@ -23,14 +23,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gosuda/cohotfs/internal/api"
 	"github.com/gosuda/cohotfs/internal/apperr"
 	"github.com/gosuda/cohotfs/internal/config"
 	"github.com/gosuda/cohotfs/internal/hostroot"
+	"github.com/gosuda/cohotfs/internal/ompimport"
 	cohotruntime "github.com/gosuda/cohotfs/internal/runtime"
 	runtimedocker "github.com/gosuda/cohotfs/internal/runtime/docker"
 	setupservice "github.com/gosuda/cohotfs/internal/setup"
 	"github.com/gosuda/cohotfs/internal/sshproxy"
 	"github.com/gosuda/cohotfs/internal/state"
+	"github.com/gosuda/cohotfs/internal/toolchain"
 	workspaceservice "github.com/gosuda/cohotfs/internal/workspace"
 	"github.com/moby/moby/api/types/container"
 )
@@ -118,6 +121,60 @@ func TestWorkspaceEndToEnd(t *testing.T) {
 		harness.remove(t, record)
 	})
 
+	t.Run("go-toolchain-with-omp-oauth", func(t *testing.T) {
+		ompRoot := filepath.Join(harness.home, "omp-fixture")
+		ompAgent := filepath.Join(ompRoot, "agent")
+		if err := os.MkdirAll(ompAgent, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		ompBinary := filepath.Join(ompRoot, "omp")
+		if err := os.WriteFile(ompBinary, []byte("#!/bin/sh\nprintf 'omp-fixture\\n'\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(ompAgent, "agent.db"), []byte("oauth fixture"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		candidates, err := toolchain.Discover(ctx, os.Environ())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var goCandidate toolchain.Candidate
+		for _, candidate := range candidates {
+			if candidate.Kind == "go" && candidate.Compatible {
+				goCandidate = candidate
+				break
+			}
+		}
+		if goCandidate.Root == "" {
+			t.Fatal("compatible host Go toolchain is unavailable")
+		}
+		goCandidate.CacheRoots = map[string]string{}
+		options := workspaceCreateOptions{
+			configure: func(workspace *config.Workspace) {
+				workspace.Spec.Integrations.HostToolchains.Enabled = true
+				workspace.Spec.Integrations.HostToolchains.Go.Enabled = true
+				workspace.Spec.Integrations.Agents.OMP.Enabled = true
+				workspace.Spec.Integrations.Agents.OMP.Import = config.OMPImportSpec{Enabled: true, Binary: true, OAuthDB: true}
+			},
+			toolchainCandidates: []toolchain.Candidate{goCandidate},
+			permittedRoots:      []string{goCandidate.Root},
+			ompSources:          ompimport.Sources{Binary: ompBinary, Agent: ompAgent},
+		}
+		harness.service.SetIntegrationHost(integrationHostStub{})
+		record, _, source := harness.createWorkspaceWithOptions(t, "it-go-omp", "once", true, config.ResourceSpec{}, options)
+		setupScript := "#!/bin/sh\nset -eu\ngo version > /workspace/setup-go-version\n"
+		if err := os.WriteFile(filepath.Join(source, "scripts", "cohotfs-setup.sh"), []byte(setupScript), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		record = harness.start(t, record)
+		assertFile(t, filepath.Join(source, "setup-go-version"), goCandidate.Version+"\n")
+		stdout, stderr := harness.ssh(t, record, nil, `go version && omp && test -s "$PI_CODING_AGENT_DIR/agent.db" && printf 'oauth-db-ok\n'`)
+		if !bytes.Contains(stdout, []byte("go version go")) || !bytes.Contains(stdout, []byte("linux/amd64")) || !bytes.Contains(stdout, []byte("omp-fixture\n")) || !bytes.Contains(stdout, []byte("oauth-db-ok\n")) || len(stderr) != 0 {
+			t.Fatalf("integrated tools stdout=%q stderr=%q", stdout, stderr)
+		}
+		harness.remove(t, record)
+	})
+
 	t.Run("loopback-fallback-disabled", func(t *testing.T) {
 		if harness.info.Capabilities[cohotruntime.Capability("loopback_publish")] || harness.info.Capabilities[cohotruntime.Capability("managed_network")] {
 			t.Fatal("Docker advertised an unverified network path")
@@ -178,7 +235,8 @@ func TestWorkspaceEndToEnd(t *testing.T) {
 
 	t.Run("resource-policy", func(t *testing.T) {
 		cases := []struct {
-			name      string
+			name string
+
 			resources config.ResourceSpec
 		}{
 			{name: "default"},
@@ -194,6 +252,20 @@ func TestWorkspaceEndToEnd(t *testing.T) {
 			})
 		}
 	})
+}
+
+type integrationHostStub struct{}
+
+func (integrationHostStub) Acquire(_ context.Context, request api.LeaseRequest) (api.LeaseResponse, error) {
+	return api.LeaseResponse{LeaseID: "integration-" + string(request.Kind)}, nil
+}
+
+func (integrationHostStub) Release(context.Context, api.ReleaseRequest) error {
+	return nil
+}
+
+func (integrationHostStub) Status(context.Context) (api.HostStatus, error) {
+	return api.HostStatus{}, nil
 }
 
 // TestSSHProxyHelper is executed by OpenSSH ProxyCommand. os.Exit prevents the
@@ -376,7 +448,18 @@ func (h *harness) operationKey(operation string) string {
 	return fmt.Sprintf("integration/%d/%s", h.sequence, operation)
 }
 
+type workspaceCreateOptions struct {
+	configure           func(*config.Workspace)
+	toolchainCandidates []toolchain.Candidate
+	permittedRoots      []string
+	ompSources          ompimport.Sources
+}
+
 func (h *harness) createWorkspace(t *testing.T, name, mode string, directorySocket bool, resources config.ResourceSpec) (state.Workspace, config.Workspace, string) {
+	return h.createWorkspaceWithOptions(t, name, mode, directorySocket, resources, workspaceCreateOptions{})
+}
+
+func (h *harness) createWorkspaceWithOptions(t *testing.T, name, mode string, directorySocket bool, resources config.ResourceSpec, options workspaceCreateOptions) (state.Workspace, config.Workspace, string) {
 	t.Helper()
 	source := filepath.Join(h.home, "projects", name)
 	if err := os.MkdirAll(filepath.Join(source, "scripts"), 0o755); err != nil {
@@ -398,6 +481,9 @@ printf 'ok\n' > /workspace/setup-result
 	workspace.Spec.Setup.Command = []string{"/bin/sh", "scripts/cohotfs-setup.sh"}
 	workspace.Spec.Setup.Timeout = time.Minute
 	workspace.Spec.Resources = resources
+	if options.configure != nil {
+		options.configure(&workspace)
+	}
 	raw, err := config.Render(workspace)
 	if err != nil {
 		t.Fatal(err)
@@ -424,6 +510,7 @@ printf 'ok\n' > /workspace/setup-result
 		OperationKey: operationKey, Workspace: workspace, CanonicalSource: source,
 		ManifestDigest: workspaceservice.ManifestDigest(raw), OwnerUID: os.Getuid(), OwnerGID: os.Getgid(),
 		Image: h.image, BackendInfo: h.info, SSHSocketPath: socketPath, BootstrapSource: publicKey,
+		ToolchainCandidates: options.toolchainCandidates, PermittedRoots: options.permittedRoots, OMPSources: options.ompSources,
 	})
 	if err != nil || record.Status != state.StatusStopped {
 		t.Fatalf("create %s record=%#v err=%v", name, record, err)

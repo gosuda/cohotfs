@@ -224,11 +224,24 @@ func selectSingleToolchains(host *config.HostConfig, candidates []toolchain.Cand
 		}
 	}
 	if len(byKind["go"]) == 1 {
-		host.Toolchains.GoRoot = byKind["go"][0].Root
+		candidate := byKind["go"][0]
+		host.Toolchains.GoRoot = candidate.Root
+		grantToolchainRoot(host, candidate.Root)
 	}
 	if len(byKind["rust"]) == 1 {
-		host.Toolchains.RustToolchain = byKind["rust"][0].Root
+		candidate := byKind["rust"][0]
+		host.Toolchains.RustToolchain = candidate.Root
+		grantToolchainRoot(host, candidate.Root)
 	}
+}
+
+func grantToolchainRoot(host *config.HostConfig, root string) {
+	for _, permitted := range host.PermittedRoots {
+		if permitted == root {
+			return
+		}
+	}
+	host.PermittedRoots = append(host.PermittedRoots, root)
 }
 
 func writeDiagnosticText(cmd *cobra.Command, checks []diagnosticCheck) {

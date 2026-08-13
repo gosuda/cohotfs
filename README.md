@@ -28,7 +28,8 @@ Cohotfs keeps the host as the control plane:
 - host integration is off by default;
 - the container never receives a Docker/runtime socket;
 - host SSH private keys, browser profiles, and agent authentication databases are
-  not mounted;
+  not mounted directly; an OMP credential database requires an explicit private
+  snapshot grant;
 - every host-side Cohotfs file and socket lives below a user-owned `~/.cohotfs`;
 - requested capabilities are checked before resources are created;
 - interrupted operations are journaled and recoverable; and
@@ -100,7 +101,7 @@ for them; they are not copied into images or durable workspace state.
 - No native containerd or CRI/CRI-O backend yet.
 - No silent runtime-exec or routable TCP fallback for workspace SSH.
 - No runtime socket, host home, `.ssh` directory, private key, normal browser
-  profile, or agent credential database mounted into a workspace.
+  profile, or directly shared agent credential database mounted into a workspace.
 - No arbitrary prebuilt image. The final image must retain the matching Cohotfs
   bootstrap contract and its OpenSSH runtime dependencies.
 - Workspace creation does not build `spec.image.build` inline yet. Run
@@ -147,6 +148,11 @@ cohotfs onboard
 cohotfs doctor
 ```
 
+`onboard` records each unambiguous native toolchain's canonical root in the host
+configuration and grants that exact path through `permittedRoots`. Rerun it after
+moving or replacing a toolchain. An enabled host toolchain whose root is not
+granted fails before container creation instead of leaving its command unavailable.
+
 Initialize trusted policy for the current project:
 
 ```console
@@ -169,6 +175,8 @@ the workspace and cannot host setup scripts.
 Bootstrap PID 1 remains container root, but setup commands, SSH shells, and
 `cohotfs exec` run with the host-mapped `agent` UID/GID. Setup is still trusted
 repository code: it can modify the writable project mount by design.
+When host toolchains are enabled, setup inherits their validated managed paths
+and caches; unrelated container or agent-secret variables remain excluded.
 
 Then enter:
 
@@ -242,8 +250,13 @@ enable only the integrations that project needs.
 OMP is opt-in. When enabled, its selected binary, native modules, model catalog,
 and non-secret configuration are cloned into workspace-owned writable snapshots;
 container writes cannot modify the host copies. Set `requireCow: true` to require
-reflink support instead of allowing a private copy-once fallback. OAuth/session
-databases (`agent.db` and its WAL/SHM files) are never imported or mounted.
+reflink support instead of allowing a private copy-once fallback. Set
+`agents.omp.import.oauthDB: true` only when the workspace may receive credentials.
+Cohotfs directly byte-copies `agent.db` and any existing `-wal`, `-shm`, or
+`-journal` sidecars into a private, writable snapshot; these files do not use
+reflinks even when `requireCow: true`. Host and workspace credential updates do
+not sync. Stop OMP or otherwise quiesce its database before workspace creation
+when a point-in-time-consistent copy is required.
 
 All host-side state stays under:
 

@@ -193,6 +193,7 @@ func (s *DockerService) Create(ctx context.Context, request CreateRequest) (resu
 			returnErr = errors.Join(returnErr, s.store.FinishOperation(id, request.OperationKey, result, returnErr, s.now()))
 		}
 	}()
+	newWorkspace := false
 	if existing, loadErr := s.store.LoadWorkspace(id); loadErr == nil {
 		if existing.Status == state.StatusStopped {
 			return existing, nil
@@ -206,7 +207,19 @@ func (s *DockerService) Create(ctx context.Context, request CreateRequest) (resu
 		}
 	} else if !errors.Is(loadErr, os.ErrNotExist) {
 		return state.Workspace{}, loadErr
+	} else {
+		newWorkspace = true
 	}
+	cleanupPreparedState := newWorkspace
+	defer func() {
+		if cleanupPreparedState {
+			returnErr = errors.Join(
+				returnErr,
+				s.root.RemoveTree(filepath.Join("run", "workspaces", id)),
+				s.root.RemoveTree(filepath.Join("workspaces", id)),
+			)
+		}
+	}()
 	plan, err := CompilePlan(
 		request.Workspace,
 		id,
@@ -257,6 +270,7 @@ func (s *DockerService) Create(ctx context.Context, request CreateRequest) (resu
 	if err := s.store.SaveWorkspace(record); err != nil {
 		return state.Workspace{}, err
 	}
+	cleanupPreparedState = false
 	mountResources, err := toolchain.Activate(&plan.Toolchains, request.Workspace.Spec.Integrations.HostToolchains.RequireCOW)
 	if err != nil {
 		return s.quarantineCreate(record, fmt.Errorf("activate toolchain resources: %w", err))

@@ -220,6 +220,7 @@ func projectToggles() []projectToggle {
 		{"OMP natives COW", func(w *config.Workspace) bool { return w.Spec.Integrations.Agents.OMP.Import.Natives }, func(w *config.Workspace, value bool) { w.Spec.Integrations.Agents.OMP.Import.Natives = value }},
 		{"OMP models COW", func(w *config.Workspace) bool { return w.Spec.Integrations.Agents.OMP.Import.Models }, func(w *config.Workspace, value bool) { w.Spec.Integrations.Agents.OMP.Import.Models = value }},
 		{"OMP config COW", func(w *config.Workspace) bool { return w.Spec.Integrations.Agents.OMP.Import.Config }, func(w *config.Workspace, value bool) { w.Spec.Integrations.Agents.OMP.Import.Config = value }},
+		{"OMP OAuth credential snapshot", func(w *config.Workspace) bool { return w.Spec.Integrations.Agents.OMP.Import.OAuthDB }, func(w *config.Workspace, value bool) { w.Spec.Integrations.Agents.OMP.Import.OAuthDB = value }},
 		{"Go toolchain", func(w *config.Workspace) bool { return w.Spec.Integrations.HostToolchains.Go.Enabled }, func(w *config.Workspace, value bool) {
 			w.Spec.Integrations.HostToolchains.Go.Enabled = value
 			w.Spec.Integrations.HostToolchains.Enabled = value || w.Spec.Integrations.HostToolchains.Rust.Enabled

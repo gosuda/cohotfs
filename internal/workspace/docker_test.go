@@ -19,6 +19,7 @@ import (
 	"github.com/gosuda/cohotfs/internal/config"
 	"github.com/gosuda/cohotfs/internal/containeragent"
 	"github.com/gosuda/cohotfs/internal/hostroot"
+	"github.com/gosuda/cohotfs/internal/ompimport"
 	"github.com/gosuda/cohotfs/internal/runtime"
 	"github.com/gosuda/cohotfs/internal/state"
 
@@ -591,6 +592,65 @@ func TestCreateOperationBodyExcludesSecretsAndVolatileProbeMetadata(t *testing.T
 	}
 	if string(changed) == string(first) {
 		t.Fatal("agent seed environment change did not affect operation body")
+	}
+}
+
+func TestCreateFailureBeforeRecordCleansPreparedState(t *testing.T) {
+	root, err := hostroot.OpenForTest(filepath.Join(t.TempDir(), "root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	store, err := state.NewStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ompRoot := t.TempDir()
+	ompBinary := filepath.Join(ompRoot, "omp")
+	if err := os.WriteFile(ompBinary, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ompAgent := filepath.Join(ompRoot, "agent")
+	if err := os.Mkdir(ompAgent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ompAgent, "agent.db"), []byte("oauth fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workspace := config.BuiltinWorkspace("token-project", "example.invalid/base:dev")
+	workspace.Spec.Integrations.Agents.OMP.Enabled = true
+	workspace.Spec.Integrations.Agents.OMP.Import = config.OMPImportSpec{Enabled: true, Binary: true, OAuthDB: true}
+	publicKey := filepath.Join(t.TempDir(), "id_ed25519.pub")
+	if err := os.WriteFile(publicKey, []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockMockMockMockMockMockMockMockMockMock test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := CreateRequest{
+		OperationKey: t.Name() + "/create", Workspace: workspace, CanonicalSource: t.TempDir(),
+		ManifestDigest: "manifest", OwnerUID: 1000, OwnerGID: 1000,
+		Image:       runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI},
+		BackendInfo: availableDocker(), SSHSocketPath: testSSHSocket(t), BootstrapSource: publicKey,
+		OMPSources:  ompimport.Sources{Binary: ompBinary, Agent: ompAgent},
+		Environment: []string{"HOME=" + t.TempDir()},
+	}
+	id, err := state.WorkspaceIDForOperationKey(request.OperationKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewDockerService(root, store, &lifecycleBackend{})
+	if _, err := service.Create(context.Background(), request); err == nil || !strings.Contains(err.Error(), "secret-like") {
+		t.Fatalf("create error = %v", err)
+	}
+	for _, relative := range []string{filepath.Join("workspaces", id), filepath.Join("run", "workspaces", id)} {
+		path, err := root.HostPath(relative)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("pre-record workspace state remains at %s: %v", path, err)
+		}
+	}
+	if _, err := store.LoadWorkspace(id); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("workspace record unexpectedly exists: %v", err)
 	}
 }
 

@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gosuda/cohotfs/internal/config"
@@ -60,6 +61,21 @@ func TestCompilePlanGVisorFailClosed(t *testing.T) {
 	}
 }
 
+func TestCompilePlanDetectsRegisteredGVisorAlias(t *testing.T) {
+	workspace := config.BuiltinWorkspace("api", "example.invalid/base:dev")
+	workspace.Spec.Runtime.Isolation = "gvisor"
+	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI}
+	backend := availableDocker()
+	backend.Runtimes = []string{"runc", "runsc"}
+	plan, err := CompilePlan(workspace, "workspace", 1000, 1000, t.TempDir(), "manifest", image, "", "/tmp/ssh.sock", backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.RuntimeAlias != "runsc" {
+		t.Fatalf("runtime alias = %q", plan.RuntimeAlias)
+	}
+}
+
 func TestRuntimeSpecContainsIdentityLabelsAndBootstrap(t *testing.T) {
 	workspace := config.BuiltinWorkspace("api", "example.invalid/base:dev")
 	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI}
@@ -71,5 +87,35 @@ func TestRuntimeSpecContainsIdentityLabelsAndBootstrap(t *testing.T) {
 	spec := plan.RuntimeSpec(bootstrap)
 	if spec.Labels[LabelWorkspaceID] != plan.WorkspaceID || spec.Labels[LabelCreationNonce] != plan.CreationNonce || spec.Mounts[len(spec.Mounts)-1] != bootstrap {
 		t.Fatalf("runtime spec = %#v", spec)
+	}
+}
+
+func TestRuntimeSpecCombinesOMPAndGoToolchainPaths(t *testing.T) {
+	workspace := config.BuiltinWorkspace("api", "example.invalid/base:dev")
+	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI}
+	plan, err := CompilePlan(workspace, "workspace", 1000, 1000, t.TempDir(), "manifest", image, "", filepath.Join(t.TempDir(), "ssh.sock"), availableDocker())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Toolchains.Environment = []string{
+		"GOROOT=/cohotfs/toolchains/go/root",
+		"PATH=/cohotfs/toolchains/go/state/bin:/cohotfs/toolchains/go/root/bin:/usr/local/bin:/usr/bin:/bin",
+	}
+	plan.OMP.Environment = []string{
+		"PI_CODING_AGENT_DIR=/home/agent/.omp/agent",
+		"PATH=/cohotfs/agents/omp/bin:/usr/local/bin:/usr/bin:/bin",
+	}
+	spec := plan.RuntimeSpec(runtime.Mount{})
+	pathCount := 0
+	path := ""
+	for _, item := range spec.Environment {
+		if strings.HasPrefix(item, "PATH=") {
+			pathCount++
+			path = item
+		}
+	}
+	const expected = "PATH=/cohotfs/agents/omp/bin:/cohotfs/toolchains/go/state/bin:/cohotfs/toolchains/go/root/bin:/usr/local/bin:/usr/bin:/bin"
+	if pathCount != 1 || path != expected {
+		t.Fatalf("runtime PATH count=%d value=%q environment=%#v", pathCount, path, spec.Environment)
 	}
 }

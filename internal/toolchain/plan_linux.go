@@ -32,6 +32,8 @@ type Plan struct {
 	Fallbacks   []string        `json:"fallbacks,omitempty"`
 }
 
+const managedToolchainPath = "/cohotfs/toolchains/go/state/bin:/cohotfs/toolchains/go/root/bin:/cohotfs/toolchains/rust/state/install/bin:/cohotfs/toolchains/rust/root/bin:/usr/local/bin:/usr/bin:/bin"
+
 func Compile(root *hostroot.Root, workspaceID string, spec config.HostToolchainsSpec, selected []Candidate, permittedRoots []string, overlayAvailable bool) (Plan, error) {
 	if !spec.Enabled {
 		return Plan{}, nil
@@ -51,8 +53,7 @@ func Compile(root *hostroot.Root, workspaceID string, spec config.HostToolchains
 			continue
 		}
 		if !pathPermitted(candidate.Root, permittedRoots) {
-			plan.Fallbacks = append(plan.Fallbacks, candidate.Kind+": image toolchain used: selected root is outside permittedRoots")
-			continue
+			return Plan{}, fmt.Errorf("%s toolchain root %s is outside permittedRoots; run cohotfs onboard or grant the root in config.yaml", candidate.Kind, candidate.Root)
 		}
 		imported = true
 		containerRoot := "/cohotfs/toolchains/" + candidate.Kind + "/root"
@@ -104,7 +105,7 @@ func Compile(root *hostroot.Root, workspaceID string, spec config.HostToolchains
 		}
 	}
 	if imported {
-		plan.Environment = append(plan.Environment, "COHOTFS_MANAGED_TOOLCHAINS=1", "PATH=/cohotfs/toolchains/go/state/bin:/cohotfs/toolchains/go/root/bin:/cohotfs/toolchains/rust/state/install/bin:/cohotfs/toolchains/rust/root/bin:/usr/local/bin:/usr/bin:/bin")
+		plan.Environment = append(plan.Environment, "COHOTFS_MANAGED_TOOLCHAINS=1", "PATH="+managedToolchainPath)
 	}
 	sort.SliceStable(plan.Mounts, func(i, j int) bool { return plan.Mounts[i].Target < plan.Mounts[j].Target })
 	return plan, nil
@@ -252,4 +253,86 @@ func ValidateManagedEnvironment(environment []string) error {
 		}
 	}
 	return nil
+}
+
+// SetupEnvironment returns only generated toolchain variables that setup
+// commands may inherit. Without the managed marker, host process variables are
+// ignored rather than copied into the container setup environment.
+func SetupEnvironment(environment []string) ([]string, error) {
+	managed := false
+	for _, item := range environment {
+		key, value, found := strings.Cut(item, "=")
+		if found && key == "COHOTFS_MANAGED_TOOLCHAINS" {
+			if value != "1" {
+				return nil, fmt.Errorf("COHOTFS_MANAGED_TOOLCHAINS must be 1")
+			}
+			managed = true
+		}
+	}
+	if !managed {
+		return nil, nil
+	}
+	result := make([]string, 0, 16)
+	seen := make(map[string]bool)
+	for _, item := range environment {
+		key, value, found := strings.Cut(item, "=")
+		if !found {
+			continue
+		}
+		if key == "TMPDIR" && value == "/home/agent/.tmp" {
+			continue
+		}
+		expected, allowed := setupEnvironmentValue(key)
+		if !allowed {
+			continue
+		}
+		if seen[key] {
+			return nil, fmt.Errorf("duplicate managed setup variable %s", key)
+		}
+		if value != expected {
+			return nil, fmt.Errorf("%s points outside the managed toolchain path", key)
+		}
+		seen[key] = true
+		result = append(result, item)
+	}
+	return result, nil
+}
+
+func setupEnvironmentValue(key string) (string, bool) {
+	switch key {
+	case "COHOTFS_MANAGED_TOOLCHAINS":
+		return "1", true
+	case "PATH":
+		return managedToolchainPath, true
+	case "GOROOT":
+		return "/cohotfs/toolchains/go/root", true
+	case "GOTOOLCHAIN":
+		return "local", true
+	case "GOMODCACHE":
+		return "/cohotfs/toolchains/go/cache/modules", true
+	case "GOCACHE":
+		return "/cohotfs/toolchains/go/cache/build", true
+	case "GOPATH":
+		return "/cohotfs/toolchains/go/state/gopath", true
+	case "GOBIN":
+		return "/cohotfs/toolchains/go/state/bin", true
+	case "GOENV":
+		return "/cohotfs/toolchains/go/state/goenv", true
+	case "GOTMPDIR":
+		return "/cohotfs/toolchains/go/state/tmp", true
+	case "RUSTC":
+		return "/cohotfs/toolchains/rust/root/bin/rustc", true
+	case "RUSTDOC":
+		return "/cohotfs/toolchains/rust/root/bin/rustdoc", true
+	case "CARGO_HOME":
+		return "/cohotfs/toolchains/rust/state/cargo-home", true
+	case "CARGO_TARGET_DIR":
+		return "/cohotfs/toolchains/rust/state/target", true
+	case "CARGO_INSTALL_ROOT":
+		return "/cohotfs/toolchains/rust/state/install", true
+	case "TMPDIR":
+		return "/cohotfs/toolchains/rust/state/tmp", true
+	default:
+		return "", false
+	}
 }

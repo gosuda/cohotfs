@@ -1,8 +1,8 @@
 //go:build linux
 
 // Package ompimport compiles explicit host OMP file imports. Selected host
-// files are reflink-cloned into workspace-owned state and only those writable
-// clones are bind-mounted into the container.
+// files, including the OAuth database and its existing sidecars, are copied
+// into workspace-owned writable snapshots.
 package ompimport
 
 import (
@@ -113,13 +113,16 @@ func Compile(root *hostroot.Root, workspaceID string, spec config.OMPAgentSpec, 
 		}
 		plan.Mounts = append(plan.Mounts, runtime.Mount{Source: snapshot, Target: containerNative, Type: "bind", Propagation: "rprivate"})
 	}
-	if (spec.Import.Models || spec.Import.Config) && sources.Agent != "" {
+	if spec.Import.OAuthDB && sources.Agent == "" {
+		return Plan{}, fmt.Errorf("OMP OAuth database source is unavailable")
+	}
+	if (spec.Import.Models || spec.Import.Config || spec.Import.OAuthDB) && sources.Agent != "" {
 		selected, err := selectedAgentFiles(spec.Import, sources.Agent)
 		if err != nil {
 			return Plan{}, err
 		}
-		if len(selected) != 0 {
-			snapshot, err := prepareSelectedSnapshot(root, workspaceID, "agent", sources.Agent, selected, spec.Import.RequireCOW)
+		if len(selected) != 0 || spec.Import.OAuthDB {
+			snapshot, err := prepareAgentSnapshot(root, workspaceID, sources.Agent, selected, spec.Import.RequireCOW)
 			if err != nil {
 				return Plan{}, err
 			}
@@ -138,6 +141,19 @@ func selectedAgentFiles(spec config.OMPImportSpec, root string) ([]string, error
 		candidates = append(candidates, "models.yml", "models.yaml")
 	}
 	selected := make([]string, 0, len(candidates))
+	if spec.OAuthDB {
+		for _, name := range []string{"agent.db", "agent.db-wal", "agent.db-shm", "agent.db-journal"} {
+			path := filepath.Join(root, name)
+			err := requireRegular(path, false)
+			if name != "agent.db" && errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return nil, fmt.Errorf("validate OMP OAuth database file %s: %w", name, err)
+			}
+			selected = append(selected, name)
+		}
+	}
 	for _, name := range candidates {
 		path := filepath.Join(root, name)
 		err := requireRegular(path, false)
@@ -178,6 +194,38 @@ func prepareSelectedSnapshot(root *hostroot.Root, workspaceID, name, source stri
 		}
 		return nil
 	})
+}
+
+func prepareAgentSnapshot(root *hostroot.Root, workspaceID, source string, selected []string, requireCOW bool) (string, error) {
+	fingerprint, err := selectedFingerprint(source, selected)
+	if err != nil {
+		return "", err
+	}
+	return prepareSnapshot(root, workspaceID, "agent", fingerprint, func(staging string) error {
+		for _, relative := range selected {
+			sourcePath := filepath.Join(source, relative)
+			destinationPath := filepath.Join(staging, relative)
+			var err error
+			if isOAuthDatabaseFile(relative) {
+				err = copyRegularFile(sourcePath, destinationPath, false)
+			} else {
+				err = cloneRegularFile(sourcePath, destinationPath, false, requireCOW)
+			}
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func isOAuthDatabaseFile(name string) bool {
+	switch name {
+	case "agent.db", "agent.db-wal", "agent.db-shm", "agent.db-journal":
+		return true
+	default:
+		return false
+	}
 }
 
 func prepareDirectorySnapshot(root *hostroot.Root, workspaceID, name, source string, requireCOW bool) (string, error) {
@@ -267,6 +315,14 @@ func cloneDirectory(source, destination string, requireCOW bool) error {
 }
 
 func cloneRegularFile(source, destination string, executable, requireCOW bool) error {
+	return writeRegularFile(source, destination, executable, true, requireCOW)
+}
+
+func copyRegularFile(source, destination string, executable bool) error {
+	return writeRegularFile(source, destination, executable, false, false)
+}
+
+func writeRegularFile(source, destination string, executable, tryReflink, requireCOW bool) error {
 	sourceFD, err := unix.Open(source, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return err
@@ -288,15 +344,24 @@ func cloneRegularFile(source, destination string, executable, requireCOW bool) e
 	}
 	destinationFile := os.NewFile(uintptr(destinationFD), destination)
 	defer destinationFile.Close()
-	if err := unix.IoctlFileClone(destinationFD, sourceFD); err != nil {
-		if requireCOW {
-			return fmt.Errorf("reflink OMP file %s: %w", source, err)
+	cloned := false
+	if tryReflink {
+		cloneErr := unix.IoctlFileClone(destinationFD, sourceFD)
+		if cloneErr == nil {
+			cloned = true
+		} else if requireCOW {
+			return fmt.Errorf("reflink OMP file %s: %w", source, cloneErr)
 		}
-		if _, seekErr := sourceFile.Seek(0, io.SeekStart); seekErr != nil {
-			return seekErr
+	}
+	if !cloned {
+		if err := unix.Ftruncate(destinationFD, 0); err != nil {
+			return err
 		}
-		if _, copyErr := io.Copy(destinationFile, sourceFile); copyErr != nil {
-			return copyErr
+		if _, err := sourceFile.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		if _, err := io.Copy(destinationFile, sourceFile); err != nil {
+			return err
 		}
 	}
 	if err := unix.Fchmod(destinationFD, mode); err != nil {

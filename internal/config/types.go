@@ -193,6 +193,7 @@ type OMPImportSpec struct {
 	Natives    bool `yaml:"natives" json:"natives"`
 	Models     bool `yaml:"models" json:"models"`
 	Config     bool `yaml:"config" json:"config"`
+	OAuthDB    bool `yaml:"oauthDB" json:"oauthDB"`
 	RequireCOW bool `yaml:"requireCow" json:"requireCow"`
 }
 

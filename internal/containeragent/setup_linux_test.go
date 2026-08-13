@@ -42,3 +42,20 @@ func TestRunSetupExitAndManagedEnvironment(t *testing.T) {
 		t.Fatalf("managed environment output = %q", result.Output)
 	}
 }
+
+func TestSetupCommandEnvironmentUsesManagedGoPath(t *testing.T) {
+	const path = "/cohotfs/toolchains/go/state/bin:/cohotfs/toolchains/go/root/bin:/cohotfs/toolchains/rust/state/install/bin:/cohotfs/toolchains/rust/root/bin:/usr/local/bin:/usr/bin:/bin"
+	environment, err := setupCommandEnvironment([]string{
+		"COHOTFS_MANAGED_TOOLCHAINS=1", "PATH=" + path,
+		"GOROOT=/cohotfs/toolchains/go/root", "OPENAI_API_KEY=secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(environment, "\n")
+	if !strings.Contains(joined, "PATH="+path) ||
+		!strings.Contains(joined, "GOROOT=/cohotfs/toolchains/go/root") ||
+		strings.Contains(joined, "OPENAI_API_KEY") {
+		t.Fatalf("setup command environment = %#v", environment)
+	}
+}

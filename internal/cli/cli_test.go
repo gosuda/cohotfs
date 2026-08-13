@@ -19,6 +19,7 @@ import (
 	"github.com/gosuda/cohotfs/internal/hostroot"
 	"github.com/gosuda/cohotfs/internal/runtime/docker"
 	"github.com/gosuda/cohotfs/internal/state"
+	"github.com/gosuda/cohotfs/internal/toolchain"
 	workspaceservice "github.com/gosuda/cohotfs/internal/workspace"
 	"github.com/spf13/cobra"
 )
@@ -465,6 +466,24 @@ func TestInteractiveOnboardCreatesConfigAndSSHIdentity(t *testing.T) {
 	}
 	if privateInfo.Mode().Perm() != 0o600 {
 		t.Fatalf("onboard private key mode = %o", privateInfo.Mode().Perm())
+	}
+}
+
+func TestSelectSingleToolchainsGrantsCanonicalRoots(t *testing.T) {
+	host := config.BuiltinHostConfig()
+	host.PermittedRoots = []string{"/already-permitted"}
+	candidates := []toolchain.Candidate{
+		{Kind: "go", Root: "/opt/go", Compatible: true},
+		{Kind: "rust", Root: "/opt/rust", Compatible: true},
+	}
+	selectSingleToolchains(&host, candidates)
+	selectSingleToolchains(&host, candidates)
+	if host.Toolchains.GoRoot != "/opt/go" || host.Toolchains.RustToolchain != "/opt/rust" {
+		t.Fatalf("selected toolchains = %#v", host.Toolchains)
+	}
+	expected := []string{"/already-permitted", "/opt/go", "/opt/rust"}
+	if strings.Join(host.PermittedRoots, "\x00") != strings.Join(expected, "\x00") {
+		t.Fatalf("permitted roots = %#v", host.PermittedRoots)
 	}
 }
 

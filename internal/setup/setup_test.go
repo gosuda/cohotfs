@@ -4,6 +4,7 @@ package setup
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/gosuda/cohotfs/internal/hostroot"
 	"github.com/gosuda/cohotfs/internal/runtime"
 	"github.com/gosuda/cohotfs/internal/state"
+	"github.com/gosuda/cohotfs/internal/toolchain"
 )
 
 func TestValidateSetupContract(t *testing.T) {
@@ -165,6 +167,112 @@ func TestManualNoopSetupValidatesAndRuns(t *testing.T) {
 	}
 }
 
+func TestServicePassesOnlyPlanToolchainEnvironment(t *testing.T) {
+	root, err := hostroot.OpenForTest(filepath.Join(t.TempDir(), "root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	store, err := state.NewStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := state.NewWorkspaceID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := state.Workspace{
+		ID: id, Status: state.StatusReady,
+		RuntimeRef:        runtime.WorkspaceRef{Backend: "docker", IDs: map[string]string{"container": "container"}, Nonce: "nonce"},
+		IntegrationGrants: map[string]bool{"hostToolchains": true},
+	}
+	if err := store.SaveWorkspace(record); err != nil {
+		t.Fatal(err)
+	}
+	const path = "/cohotfs/toolchains/go/state/bin:/cohotfs/toolchains/go/root/bin:/cohotfs/toolchains/rust/state/install/bin:/cohotfs/toolchains/rust/root/bin:/usr/local/bin:/usr/bin:/bin"
+	plan := struct {
+		SchemaVersion int            `json:"schemaVersion"`
+		WorkspaceID   string         `json:"workspaceID"`
+		Toolchains    toolchain.Plan `json:"toolchains"`
+	}{
+		SchemaVersion: 1, WorkspaceID: id,
+		Toolchains: toolchain.Plan{Environment: []string{
+			"COHOTFS_MANAGED_TOOLCHAINS=1", "PATH=" + path,
+			"GOROOT=/cohotfs/toolchains/go/root", "OPENAI_API_KEY=secret",
+		}},
+	}
+	raw, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveWorkspaceArtifact(id, "plan.json", raw); err != nil {
+		t.Fatal(err)
+	}
+	backend := &setupBackend{result: runtime.ExecResult{ExitCode: 0}}
+	spec := config.BuiltinWorkspace("project", "example.invalid/base:dev").Spec.Setup
+	if _, err := NewService(store, backend).Run(context.Background(), id, spec, Validation{Digest: "digest", User: "1000:1000"}, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if !environmentContains(backend.last.Environment, "PATH="+path) ||
+		!environmentContains(backend.last.Environment, "GOROOT=/cohotfs/toolchains/go/root") ||
+		environmentContains(backend.last.Environment, "OPENAI_API_KEY=secret") {
+		t.Fatalf("setup exec environment = %#v", backend.last.Environment)
+	}
+}
+
+func TestSetupPlanErrorsPreserveWorkspaceState(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		plan      []byte
+		writePlan bool
+	}{
+		{name: "missing"},
+		{name: "corrupt", plan: []byte("{"), writePlan: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			root, err := hostroot.OpenForTest(filepath.Join(t.TempDir(), "root"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			store, err := state.NewStore(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			id, err := state.NewWorkspaceID()
+			if err != nil {
+				t.Fatal(err)
+			}
+			initial := state.Workspace{
+				ID: id, Status: state.StatusReady,
+				RuntimeRef:        runtime.WorkspaceRef{Backend: "docker", IDs: map[string]string{"container": "container"}, Nonce: "nonce"},
+				IntegrationGrants: map[string]bool{"hostToolchains": true},
+			}
+			if err := store.SaveWorkspace(initial); err != nil {
+				t.Fatal(err)
+			}
+			if testCase.writePlan {
+				if err := store.SaveWorkspaceArtifact(id, "plan.json", testCase.plan); err != nil {
+					t.Fatal(err)
+				}
+			}
+			backend := &setupBackend{result: runtime.ExecResult{ExitCode: 0}}
+			spec := config.BuiltinWorkspace("project", "example.invalid/base:dev").Spec.Setup
+			record, runErr := NewService(store, backend).Run(context.Background(), id, spec, Validation{Digest: "digest", User: "1000:1000"}, true, false)
+			if runErr == nil || record.Status != state.StatusReady || backend.requests != 0 {
+				t.Fatalf("setup result record=%#v requests=%d err=%v", record, backend.requests, runErr)
+			}
+			persisted, err := store.LoadWorkspace(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if persisted.Status != state.StatusReady || persisted.Setup != initial.Setup {
+				t.Fatalf("persisted workspace changed: %#v", persisted)
+			}
+		})
+	}
+}
+
 func TestSetupFailureAndOnceSuccess(t *testing.T) {
 	root, err := hostroot.OpenForTest(filepath.Join(t.TempDir(), "root"))
 	if err != nil {
@@ -197,4 +305,13 @@ func TestSetupFailureAndOnceSuccess(t *testing.T) {
 	if err != nil || record.Status != state.StatusReady || backend.requests != 3 {
 		t.Fatalf("forced ready rerun: requests=%d record=%#v err=%v", backend.requests, record, err)
 	}
+}
+
+func environmentContains(environment []string, expected string) bool {
+	for _, item := range environment {
+		if item == expected {
+			return true
+		}
+	}
+	return false
 }

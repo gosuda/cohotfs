@@ -47,7 +47,7 @@ func TestCompileBuildsWritableReflinkMountsForSelectedOMPState(t *testing.T) {
 			t.Fatalf("selected OMP state %s is unavailable: %v", relative, err)
 		}
 	}
-	for _, excluded := range []string{"agent.db", "agent.db-wal", "agent.db-shm", "history.db"} {
+	for _, excluded := range []string{"agent.db", "agent.db-wal", "agent.db-shm", "agent.db-journal", "history.db"} {
 		if _, err := os.Stat(filepath.Join(agentMount.Source, excluded)); !os.IsNotExist(err) {
 			t.Fatalf("secret or unselected OMP state %s was imported: %v", excluded, err)
 		}
@@ -65,6 +65,60 @@ func TestCompileBuildsWritableReflinkMountsForSelectedOMPState(t *testing.T) {
 	}
 	if !contains(plan.Environment, "PI_CODING_AGENT_DIR="+containerAgent) || !contains(plan.Environment, "PATH="+containerBinaryDir+":/usr/local/bin:/usr/bin:/bin") {
 		t.Fatalf("OMP environment = %#v", plan.Environment)
+	}
+}
+
+func TestCompileCopiesOAuthDatabaseFilesDespiteRequireCOW(t *testing.T) {
+	root := openTestRoot(t)
+	defer root.Close()
+	sources := ompFixture(t)
+	spec := config.OMPAgentSpec{
+		Enabled: true,
+		Import: config.OMPImportSpec{
+			Enabled: true, OAuthDB: true, RequireCOW: true,
+		},
+	}
+
+	plan, err := Compile(root, testWorkspaceID, spec, sources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := requiredMount(t, plan, containerAgent).Source
+	for _, name := range []string{"agent.db", "agent.db-wal", "agent.db-shm", "agent.db-journal"} {
+		sourcePath := filepath.Join(sources.Agent, name)
+		snapshotPath := filepath.Join(agent, name)
+		source, err := os.ReadFile(sourcePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshot, err := os.ReadFile(snapshotPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(snapshot) != string(source) {
+			t.Fatalf("OAuth database file %s changed during copy", name)
+		}
+		sourceInfo, err := os.Stat(sourcePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshotInfo, err := os.Stat(snapshotPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if os.SameFile(sourceInfo, snapshotInfo) {
+			t.Fatalf("OAuth database file %s reuses the host inode", name)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(agent, "agent.db"), []byte("workspace-update"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hostDatabase, err := os.ReadFile(filepath.Join(sources.Agent, "agent.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(hostDatabase) != "sqlite fixture" {
+		t.Fatalf("host OAuth database changed: %q", hostDatabase)
 	}
 }
 
@@ -235,12 +289,13 @@ func ompFixture(t *testing.T) Sources {
 		t.Fatal(err)
 	}
 	for name, content := range map[string]string{
-		"config.yml":   "model: fixture\n",
-		"models.yml":   "models: {}\n",
-		"agent.db":     "sqlite fixture",
-		"agent.db-wal": "private WAL",
-		"agent.db-shm": "private SHM",
-		"history.db":   "private history",
+		"config.yml":       "model: fixture\n",
+		"models.yml":       "models: {}\n",
+		"agent.db":         "sqlite fixture",
+		"agent.db-wal":     "private WAL",
+		"agent.db-shm":     "private SHM",
+		"agent.db-journal": "private journal",
+		"history.db":       "private history",
 	} {
 		if err := os.WriteFile(filepath.Join(agent, name), []byte(content), 0o600); err != nil {
 			t.Fatal(err)

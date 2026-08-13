@@ -101,10 +101,10 @@ func CompilePlan(workspace config.Workspace, workspaceID string, ownerUID, owner
 		plan.Resources = runtime.ResourceLimits{Enabled: true, NanoCPUs: int64(cpu), MemoryBytes: int64(workspace.Spec.Resources.Memory), MemorySwapBytes: int64(workspace.Spec.Resources.MemorySwap), PIDs: workspace.Spec.Resources.PIDs, NofileSoft: workspace.Spec.Resources.Nofile.Soft, NofileHard: workspace.Spec.Resources.Nofile.Hard}
 	}
 	if workspace.Spec.Runtime.Isolation == "gvisor" {
-		if gvisorRuntime == "" {
-			return Plan{}, fmt.Errorf("gVisor runtime alias is not configured")
+		plan.RuntimeAlias, err = resolveGVisorRuntimeAlias(gvisorRuntime, backend)
+		if err != nil {
+			return Plan{}, err
 		}
-		plan.RuntimeAlias = gvisorRuntime
 		plan.Required = append(plan.Required, runtime.CapabilityRuntimeSelect)
 	}
 	if !backend.Capabilities[runtime.CapabilityHostSocketBind] || sshSocketPath == "" {
@@ -121,6 +121,30 @@ func CompilePlan(workspace config.Workspace, workspaceID string, ownerUID, owner
 	return plan, nil
 }
 
+func resolveGVisorRuntimeAlias(configured string, backend runtime.BackendInfo) (string, error) {
+	if configured != "" {
+		return configured, nil
+	}
+	for _, preferred := range []string{"runsc", "gvisor"} {
+		for _, available := range backend.Runtimes {
+			if available == preferred {
+				return available, nil
+			}
+		}
+	}
+	for _, available := range backend.Runtimes {
+		name := strings.ToLower(available)
+		if strings.Contains(name, "runsc") || strings.Contains(name, "gvisor") {
+			return available, nil
+		}
+	}
+	return "", &runtime.UnsupportedError{
+		Backend:    backend.Name,
+		Capability: runtime.CapabilityRuntimeSelect,
+		Reason:     "gVisor is not registered with Docker; configure runtime.docker.gvisorRuntime or install a runsc runtime",
+	}
+}
+
 func (p Plan) RuntimeSpec(bootstrapMount runtime.Mount) runtime.WorkspaceSpec {
 	labels := map[string]string{
 		LabelOwnerUID: fmt.Sprint(p.OwnerUID), LabelWorkspaceID: p.WorkspaceID,
@@ -130,15 +154,54 @@ func (p Plan) RuntimeSpec(bootstrapMount runtime.Mount) runtime.WorkspaceSpec {
 	mounts = append(mounts, p.Toolchains.Mounts...)
 	mounts = append(mounts, p.OMP.Mounts...)
 	mounts = append(mounts, bootstrapMount)
-	environment := append([]string(nil), p.Environment...)
-	environment = append(environment, p.Toolchains.Environment...)
-	environment = append(environment, p.OMP.Environment...)
+	environment := runtimeEnvironment(p.Environment, p.Toolchains.Environment, p.OMP.Environment)
 	return runtime.WorkspaceSpec{
 		WorkspaceID: p.WorkspaceID, OwnerUID: p.OwnerUID, OwnerGID: p.OwnerGID,
 		ManifestDigest: p.ManifestDigest, CreationNonce: p.CreationNonce, Image: p.Image,
 		Runtime: p.RuntimeAlias, Environment: environment, Mounts: mounts,
 		Resources: p.Resources, Labels: labels,
 	}
+}
+
+func runtimeEnvironment(base, toolchains, omp []string) []string {
+	groups := [][]string{base, toolchains, omp}
+	environment := make([]string, 0, len(base)+len(toolchains)+len(omp))
+	for _, group := range groups {
+		for _, item := range group {
+			if !strings.HasPrefix(item, "PATH=") {
+				environment = append(environment, item)
+			}
+		}
+	}
+
+	seen := make(map[string]bool)
+	preferred := make([]string, 0, 8)
+	system := make([]string, 0, 3)
+	for _, group := range [][]string{omp, toolchains, base} {
+		for _, item := range group {
+			name, value, found := strings.Cut(item, "=")
+			if !found || name != "PATH" {
+				continue
+			}
+			for _, directory := range strings.Split(value, ":") {
+				if directory == "" || seen[directory] {
+					continue
+				}
+				seen[directory] = true
+				switch directory {
+				case "/usr/local/bin", "/usr/bin", "/bin":
+					system = append(system, directory)
+				default:
+					preferred = append(preferred, directory)
+				}
+			}
+		}
+	}
+	if len(preferred)+len(system) != 0 {
+		preferred = append(preferred, system...)
+		environment = append(environment, "PATH="+strings.Join(preferred, ":"))
+	}
+	return environment
 }
 
 func ManifestDigest(raw []byte) string {

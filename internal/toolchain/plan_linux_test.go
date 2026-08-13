@@ -47,6 +47,37 @@ func TestCompileHonorsKindAndIsolatedCachePolicy(t *testing.T) {
 	}
 }
 
+func TestCompileRequiresSelectedGoRootPermission(t *testing.T) {
+	root, closeRoot := testRoot(t)
+	defer closeRoot()
+	goRoot := directory(t, t.TempDir(), "go")
+	candidate := Candidate{
+		Kind: "go", Root: goRoot, Compatible: true, Fingerprint: "go-fingerprint",
+		CacheRoots: map[string]string{},
+	}
+	spec := config.HostToolchainsSpec{
+		Enabled: true, Persistence: "workspace",
+		Go:   config.GoImportSpec{Enabled: true, Caches: "cow"},
+		Rust: config.RustImportSpec{Caches: "cow"},
+	}
+	if _, err := Compile(root, "aaaaaaaaaaaaaaaaaaaaaaaaaa", spec, []Candidate{candidate}, nil, false); err == nil || !strings.Contains(err.Error(), "run cohotfs onboard") {
+		t.Fatalf("missing permitted root error = %v", err)
+	}
+	plan, err := Compile(root, "aaaaaaaaaaaaaaaaaaaaaaaaaa", spec, []Candidate{candidate}, []string{goRoot}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mounted := false
+	for _, mount := range plan.Mounts {
+		if mount.Target == "/cohotfs/toolchains/go/root" {
+			mounted = mount.Source == goRoot && mount.ReadOnly
+		}
+	}
+	if !mounted || !containsEnvironment(plan.Environment, "GOROOT=/cohotfs/toolchains/go/root") {
+		t.Fatalf("Go toolchain plan = %#v", plan)
+	}
+}
+
 func TestCompileRequiresEveryRequestedCOWLower(t *testing.T) {
 	root, closeRoot := testRoot(t)
 	defer closeRoot()
@@ -116,6 +147,29 @@ func TestValidateManagedEnvironmentRejectsOverrides(t *testing.T) {
 		if err := ValidateManagedEnvironment(environment); err == nil {
 			t.Fatalf("accepted environment %#v", environment)
 		}
+	}
+}
+
+func TestSetupEnvironmentAllowsOnlyGeneratedToolchainVariables(t *testing.T) {
+	input := []string{
+		"COHOTFS_MANAGED_TOOLCHAINS=1",
+		"PATH=" + managedToolchainPath,
+		"GOROOT=/cohotfs/toolchains/go/root",
+		"OPENAI_API_KEY=secret",
+		"TMPDIR=/home/agent/.tmp",
+	}
+	environment, err := SetupEnvironment(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(environment) != 3 || containsEnvironmentPrefix(environment, "OPENAI_API_KEY=") {
+		t.Fatalf("setup environment = %#v", environment)
+	}
+	if _, err := SetupEnvironment([]string{"COHOTFS_MANAGED_TOOLCHAINS=1", "PATH=/host/bin"}); err == nil {
+		t.Fatal("accepted unmanaged setup PATH")
+	}
+	if environment, err := SetupEnvironment([]string{"GOROOT=/host/go"}); err != nil || len(environment) != 0 {
+		t.Fatalf("unmarked environment = %#v, %v", environment, err)
 	}
 }
 

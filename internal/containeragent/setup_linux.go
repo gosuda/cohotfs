@@ -9,8 +9,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
+
+	"github.com/gosuda/cohotfs/internal/toolchain"
 )
 
 const setupOutputLimit = 1 << 20
@@ -28,12 +31,13 @@ func RunSetup(ctx context.Context, timeout time.Duration, argv []string) (SetupR
 	}
 	setupContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	environment, err := setupCommandEnvironment(os.Environ())
+	if err != nil {
+		return SetupResult{}, fmt.Errorf("prepare setup environment: %w", err)
+	}
 	command := exec.Command(argv[0], argv[1:]...)
 	command.Dir = "/workspace"
-	command.Env = []string{
-		"HOME=/home/agent", "XDG_CONFIG_HOME=/home/agent/.config", "XDG_CACHE_HOME=/home/agent/.cache",
-		"XDG_DATA_HOME=/home/agent/.local/share", "TMPDIR=/home/agent/.tmp", "PATH=/usr/local/bin:/usr/bin:/bin",
-	}
+	command.Env = environment
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	capture := &boundedBuffer{limit: setupOutputLimit}
 	command.Stdout, command.Stderr = capture, capture
@@ -62,6 +66,22 @@ func RunSetup(ctx context.Context, timeout time.Duration, argv []string) (SetupR
 			return SetupResult{ExitCode: exitCode(err), Output: append([]byte(nil), capture.Bytes()...), Truncated: capture.truncated, TimedOut: true}, setupContext.Err()
 		}
 	}
+}
+
+func setupCommandEnvironment(host []string) ([]string, error) {
+	environment := []string{
+		"HOME=/home/agent", "XDG_CONFIG_HOME=/home/agent/.config", "XDG_CACHE_HOME=/home/agent/.cache",
+		"XDG_DATA_HOME=/home/agent/.local/share", "TMPDIR=/home/agent/.tmp", "PATH=/usr/local/bin:/usr/bin:/bin",
+	}
+	managed, err := toolchain.SetupEnvironment(host)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range managed {
+		key, value, _ := strings.Cut(item, "=")
+		environment = replaceEnvironment(environment, key, value)
+	}
+	return environment, nil
 }
 
 func exitCode(err error) int {

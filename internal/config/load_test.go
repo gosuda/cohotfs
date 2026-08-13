@@ -9,6 +9,7 @@ import (
 
 func TestWorkspaceRoundTripAndStrictUnknownFields(t *testing.T) {
 	want := BuiltinWorkspace("api-service", "example.invalid/workspace:dev")
+	want.Spec.Integrations.Agents.OMP.Import.OAuthDB = true
 	raw, err := Render(want)
 	if err != nil {
 		t.Fatal(err)
@@ -17,7 +18,7 @@ func TestWorkspaceRoundTripAndStrictUnknownFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode rendered workspace:\n%s\n%v", raw, err)
 	}
-	if got.Metadata.Name != want.Metadata.Name || got.Spec.Setup.Timeout != 15*time.Minute || got.Spec.Resources.Memory != 4<<30 {
+	if got.Metadata.Name != want.Metadata.Name || got.Spec.Setup.Timeout != 15*time.Minute || got.Spec.Resources.Memory != 4<<30 || !got.Spec.Integrations.Agents.OMP.Import.OAuthDB {
 		t.Fatalf("unexpected round trip: %#v", got)
 	}
 	malicious := bytes.Replace(raw, []byte("metadata:\n"), []byte("metadata:\n  unexpected: true\n"), 1)

@@ -2,12 +2,14 @@ package setup
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/gosuda/cohotfs/internal/config"
 	"github.com/gosuda/cohotfs/internal/runtime"
 	"github.com/gosuda/cohotfs/internal/state"
+	"github.com/gosuda/cohotfs/internal/toolchain"
 )
 
 type Service struct {
@@ -59,6 +61,14 @@ func (s *Service) RunLocked(ctx context.Context, record *state.Workspace, setupS
 	if record.Status != state.StatusReady && record.Status != state.StatusStarting && record.Status != state.StatusSetup && record.Status != state.StatusSetupFailed && record.Status != state.StatusStopped {
 		return fmt.Errorf("setup cannot run from %s", record.Status)
 	}
+	environment := []string{"HOME=/home/agent", "XDG_CONFIG_HOME=/home/agent/.config", "XDG_CACHE_HOME=/home/agent/.cache", "XDG_DATA_HOME=/home/agent/.local/share", "TMPDIR=/home/agent/.tmp"}
+	if record.IntegrationGrants["hostToolchains"] {
+		managed, err := s.setupToolchainEnvironment(record.ID)
+		if err != nil {
+			return err
+		}
+		environment = append(environment, managed...)
+	}
 	if record.Status == state.StatusStopped || record.Status == state.StatusSetupFailed {
 		if err := record.Transition(state.StatusStarting, s.now()); err != nil {
 			return err
@@ -76,7 +86,7 @@ func (s *Service) RunLocked(ctx context.Context, record *state.Workspace, setupS
 		Argv:       append([]string{"/usr/local/libexec/cohotfs-agent", "setup", "--timeout", setupSpec.Timeout.String(), "--"}, setupSpec.Command...),
 		WorkingDir: "/workspace", User: validation.User, Timeout: setupSpec.Timeout + 15*time.Second,
 		OutputLimit: 1 << 20,
-		Environment: []string{"HOME=/home/agent", "XDG_CONFIG_HOME=/home/agent/.config", "XDG_CACHE_HOME=/home/agent/.cache", "XDG_DATA_HOME=/home/agent/.local/share", "TMPDIR=/home/agent/.tmp"},
+		Environment: environment,
 	}
 	result, runErr := s.backend.ExecSync(ctx, record.RuntimeRef, request)
 	record.Setup = state.SetupResult{Digest: validation.Digest, Succeeded: runErr == nil && result.ExitCode == 0, ExitCode: result.ExitCode, Output: string(result.Output), Truncated: result.Truncated, FinishedAt: s.now().UTC()}
@@ -99,4 +109,27 @@ func (s *Service) RunLocked(ctx context.Context, record *state.Workspace, setupS
 		return fmt.Errorf("setup exited %d", result.ExitCode)
 	}
 	return nil
+}
+
+func (s *Service) setupToolchainEnvironment(workspaceID string) ([]string, error) {
+	raw, err := s.store.LoadWorkspaceArtifact(workspaceID, "plan.json")
+	if err != nil {
+		return nil, fmt.Errorf("load workspace plan for setup: %w", err)
+	}
+	var plan struct {
+		SchemaVersion int            `json:"schemaVersion"`
+		WorkspaceID   string         `json:"workspaceID"`
+		Toolchains    toolchain.Plan `json:"toolchains"`
+	}
+	if err := json.Unmarshal(raw, &plan); err != nil {
+		return nil, fmt.Errorf("decode workspace plan for setup: %w", err)
+	}
+	if plan.SchemaVersion != 1 || plan.WorkspaceID != workspaceID {
+		return nil, fmt.Errorf("workspace plan identity is invalid")
+	}
+	environment, err := toolchain.SetupEnvironment(plan.Toolchains.Environment)
+	if err != nil {
+		return nil, fmt.Errorf("validate setup toolchain environment: %w", err)
+	}
+	return environment, nil
 }
