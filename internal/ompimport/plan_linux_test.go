@@ -68,14 +68,21 @@ func TestCompileBuildsWritableReflinkMountsForSelectedOMPState(t *testing.T) {
 	}
 }
 
-func TestCompileCopiesOAuthDatabaseFilesDespiteRequireCOW(t *testing.T) {
+func TestCompileClonesCompleteAgentDirectoryWhenOAuthEnabled(t *testing.T) {
 	root := openTestRoot(t)
 	defer root.Close()
 	sources := ompFixture(t)
+	nested := filepath.Join(sources.Agent, "sessions", "current")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "session.json"), []byte("session fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	spec := config.OMPAgentSpec{
 		Enabled: true,
 		Import: config.OMPImportSpec{
-			Enabled: true, OAuthDB: true, RequireCOW: true,
+			Enabled: true, OAuthDB: true, RequireCOW: false,
 		},
 	}
 
@@ -84,7 +91,10 @@ func TestCompileCopiesOAuthDatabaseFilesDespiteRequireCOW(t *testing.T) {
 		t.Fatal(err)
 	}
 	agent := requiredMount(t, plan, containerAgent).Source
-	for _, name := range []string{"agent.db", "agent.db-wal", "agent.db-shm", "agent.db-journal"} {
+	for _, name := range []string{
+		"agent.db", "agent.db-wal", "agent.db-shm", "agent.db-journal",
+		"config.yml", "models.yml", "history.db", filepath.Join("sessions", "current", "session.json"),
+	} {
 		sourcePath := filepath.Join(sources.Agent, name)
 		snapshotPath := filepath.Join(agent, name)
 		source, err := os.ReadFile(sourcePath)
@@ -96,7 +106,7 @@ func TestCompileCopiesOAuthDatabaseFilesDespiteRequireCOW(t *testing.T) {
 			t.Fatal(err)
 		}
 		if string(snapshot) != string(source) {
-			t.Fatalf("OAuth database file %s changed during copy", name)
+			t.Fatalf("OMP agent file %s changed during clone", name)
 		}
 		sourceInfo, err := os.Stat(sourcePath)
 		if err != nil {
@@ -107,7 +117,7 @@ func TestCompileCopiesOAuthDatabaseFilesDespiteRequireCOW(t *testing.T) {
 			t.Fatal(err)
 		}
 		if os.SameFile(sourceInfo, snapshotInfo) {
-			t.Fatalf("OAuth database file %s reuses the host inode", name)
+			t.Fatalf("OMP agent file %s reuses the host inode", name)
 		}
 	}
 	if err := os.WriteFile(filepath.Join(agent, "agent.db"), []byte("workspace-update"), 0o600); err != nil {
@@ -205,6 +215,59 @@ func TestCompileChangesSnapshotWhenHostStateChanges(t *testing.T) {
 	}
 	if requiredMount(t, first, containerAgent).Source == requiredMount(t, second, containerAgent).Source {
 		t.Fatal("changed OMP state reused the previous COW snapshot")
+	}
+}
+
+func TestCompileInvalidatesFullAgentSnapshotWhenContentChangesWithoutMetadata(t *testing.T) {
+	root := openTestRoot(t)
+	defer root.Close()
+	sources := ompFixture(t)
+	spec := config.OMPAgentSpec{
+		Enabled: true,
+		Import:  config.OMPImportSpec{Enabled: true, OAuthDB: true},
+	}
+	first, err := Compile(root, testWorkspaceID, spec, sources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyPath := filepath.Join(sources.Agent, "history.db")
+	info, err := os.Stat(historyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := os.ReadFile(historyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed[0] ^= 0xff
+	if err := os.WriteFile(historyPath, changed, info.Mode().Perm()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(historyPath, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	changedInfo, err := os.Stat(historyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changedInfo.Size() != info.Size() || !changedInfo.ModTime().Equal(info.ModTime()) {
+		t.Fatalf("test mutation changed metadata: before=%#v after=%#v", info, changedInfo)
+	}
+	second, err := Compile(root, testWorkspaceID, spec, sources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstAgent := requiredMount(t, first, containerAgent).Source
+	secondAgent := requiredMount(t, second, containerAgent).Source
+	if firstAgent == secondAgent {
+		t.Fatal("content change with stable size and mtime reused the previous full agent snapshot")
+	}
+	snapshot, err := os.ReadFile(filepath.Join(secondAgent, "history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(snapshot) != string(changed) {
+		t.Fatal("new full agent snapshot does not contain changed content")
 	}
 }
 

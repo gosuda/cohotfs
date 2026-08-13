@@ -1,8 +1,7 @@
 //go:build linux
 
-// Package ompimport compiles explicit host OMP file imports. Selected host
-// files, including the OAuth database and its existing sidecars, are copied
-// into workspace-owned writable snapshots.
+// Package ompimport compiles explicit host OMP imports into workspace-owned
+// writable snapshots.
 package ompimport
 
 import (
@@ -113,16 +112,22 @@ func Compile(root *hostroot.Root, workspaceID string, spec config.OMPAgentSpec, 
 		}
 		plan.Mounts = append(plan.Mounts, runtime.Mount{Source: snapshot, Target: containerNative, Type: "bind", Propagation: "rprivate"})
 	}
-	if spec.Import.OAuthDB && sources.Agent == "" {
-		return Plan{}, fmt.Errorf("OMP OAuth database source is unavailable")
-	}
-	if (spec.Import.Models || spec.Import.Config || spec.Import.OAuthDB) && sources.Agent != "" {
+	if spec.Import.OAuthDB {
+		if sources.Agent == "" {
+			return Plan{}, fmt.Errorf("OMP agent directory source is unavailable")
+		}
+		snapshot, err := prepareDirectorySnapshot(root, workspaceID, "agent", sources.Agent, spec.Import.RequireCOW)
+		if err != nil {
+			return Plan{}, err
+		}
+		plan.Mounts = append(plan.Mounts, runtime.Mount{Source: snapshot, Target: containerAgent, Type: "bind", Propagation: "rprivate"})
+	} else if (spec.Import.Models || spec.Import.Config) && sources.Agent != "" {
 		selected, err := selectedAgentFiles(spec.Import, sources.Agent)
 		if err != nil {
 			return Plan{}, err
 		}
-		if len(selected) != 0 || spec.Import.OAuthDB {
-			snapshot, err := prepareAgentSnapshot(root, workspaceID, sources.Agent, selected, spec.Import.RequireCOW)
+		if len(selected) != 0 {
+			snapshot, err := prepareSelectedSnapshot(root, workspaceID, "agent", sources.Agent, selected, spec.Import.RequireCOW)
 			if err != nil {
 				return Plan{}, err
 			}
@@ -141,19 +146,6 @@ func selectedAgentFiles(spec config.OMPImportSpec, root string) ([]string, error
 		candidates = append(candidates, "models.yml", "models.yaml")
 	}
 	selected := make([]string, 0, len(candidates))
-	if spec.OAuthDB {
-		for _, name := range []string{"agent.db", "agent.db-wal", "agent.db-shm", "agent.db-journal"} {
-			path := filepath.Join(root, name)
-			err := requireRegular(path, false)
-			if name != "agent.db" && errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			if err != nil {
-				return nil, fmt.Errorf("validate OMP OAuth database file %s: %w", name, err)
-			}
-			selected = append(selected, name)
-		}
-	}
 	for _, name := range candidates {
 		path := filepath.Join(root, name)
 		err := requireRegular(path, false)
@@ -194,38 +186,6 @@ func prepareSelectedSnapshot(root *hostroot.Root, workspaceID, name, source stri
 		}
 		return nil
 	})
-}
-
-func prepareAgentSnapshot(root *hostroot.Root, workspaceID, source string, selected []string, requireCOW bool) (string, error) {
-	fingerprint, err := selectedFingerprint(source, selected)
-	if err != nil {
-		return "", err
-	}
-	return prepareSnapshot(root, workspaceID, "agent", fingerprint, func(staging string) error {
-		for _, relative := range selected {
-			sourcePath := filepath.Join(source, relative)
-			destinationPath := filepath.Join(staging, relative)
-			var err error
-			if isOAuthDatabaseFile(relative) {
-				err = copyRegularFile(sourcePath, destinationPath, false)
-			} else {
-				err = cloneRegularFile(sourcePath, destinationPath, false, requireCOW)
-			}
-			if err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-}
-
-func isOAuthDatabaseFile(name string) bool {
-	switch name {
-	case "agent.db", "agent.db-wal", "agent.db-shm", "agent.db-journal":
-		return true
-	default:
-		return false
-	}
 }
 
 func prepareDirectorySnapshot(root *hostroot.Root, workspaceID, name, source string, requireCOW bool) (string, error) {
@@ -318,10 +278,6 @@ func cloneRegularFile(source, destination string, executable, requireCOW bool) e
 	return writeRegularFile(source, destination, executable, true, requireCOW)
 }
 
-func copyRegularFile(source, destination string, executable bool) error {
-	return writeRegularFile(source, destination, executable, false, false)
-}
-
 func writeRegularFile(source, destination string, executable, tryReflink, requireCOW bool) error {
 	sourceFD, err := unix.Open(source, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -399,11 +355,14 @@ func selectedFingerprint(root string, names []string) (string, error) {
 	sort.Strings(names)
 	for _, name := range names {
 		path := filepath.Join(root, name)
-		entry, err := os.Stat(path)
+		entry, err := os.Lstat(path)
 		if err != nil {
 			return "", err
 		}
 		if _, err := fmt.Fprintf(hash, "%s\x00%d\x00%d\x00%d\x00", name, entry.Mode(), entry.Size(), entry.ModTime().UnixNano()); err != nil {
+			return "", err
+		}
+		if err := fingerprintRegularFile(hash, path); err != nil {
 			return "", err
 		}
 	}
@@ -426,7 +385,28 @@ func fingerprintEntry(hash interface{ Write([]byte) (int, error) }, path, relati
 		_, err = fmt.Fprintf(hash, "%s\x00", target)
 		return err
 	}
+	if info.Mode().IsRegular() {
+		return fingerprintRegularFile(hash, path)
+	}
 	return nil
+}
+
+func fingerprintRegularFile(hash io.Writer, path string) error {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	file := os.NewFile(uintptr(fd), path)
+	defer file.Close()
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
+		return fmt.Errorf("unsafe OMP file %s", path)
+	}
+	_, err = io.Copy(hash, file)
+	return err
 }
 
 func requireRegular(path string, executable bool) error {

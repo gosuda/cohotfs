@@ -705,7 +705,15 @@ func (s *DockerService) startLocked(ctx context.Context, record state.Workspace)
 	}
 	releasePins, err := pinReservedWorkspaceMasks(plan)
 	if err != nil {
-		return record, err
+		if !status.Running {
+			return record, err
+		}
+		cleanupCtx := context.WithoutCancel(ctx)
+		stopErr := s.backend.Stop(cleanupCtx, record.RuntimeRef, 10*time.Second)
+		leaseErr := s.releaseActiveIntegrationLeases(cleanupCtx, &record)
+		transitionErr := record.Transition(state.StatusError, s.now())
+		saveErr := s.store.SaveWorkspace(record)
+		return record, errors.Join(err, stopErr, leaseErr, transitionErr, saveErr)
 	}
 	defer func() { releasePins() }()
 	if err := s.acquireIntegrationLeases(ctx, &record, plan); err != nil {

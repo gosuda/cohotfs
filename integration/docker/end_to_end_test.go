@@ -139,18 +139,32 @@ func TestWorkspaceEndToEnd(t *testing.T) {
 		}}
 		record, _, source := harness.createWorkspaceWithOptions(t, "it-reserved-mask", "manual", true, config.ResourceSpec{}, options)
 		record = harness.start(t, record)
-		after, err := os.Lstat(filepath.Join(source, ".omp"))
+		assertReservedMask := func() {
+			after, err := os.Lstat(filepath.Join(source, ".omp"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !os.SameFile(before, after) {
+				t.Fatal("Docker replaced the host reserved directory")
+			}
+			assertFile(t, filepath.Join(source, ".omp", "host-sentinel"), "host-only\n")
+			stdout, stderr := harness.ssh(t, record, nil, `test -d /workspace/.omp && test ! -e /workspace/.omp/host-sentinel && printf 'reserved-mask-ok\n'`)
+			if string(stdout) != "reserved-mask-ok\n" || len(stderr) != 0 {
+				t.Fatalf("reserved mask stdout=%q stderr=%q", stdout, stderr)
+			}
+		}
+		assertReservedMask()
+		record = harness.stop(t, record)
+		afterStop, err := os.Lstat(filepath.Join(source, ".omp"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !os.SameFile(before, after) {
-			t.Fatal("Docker replaced the host reserved directory")
+		if !os.SameFile(before, afterStop) {
+			t.Fatal("stopping replaced the host reserved directory")
 		}
 		assertFile(t, filepath.Join(source, ".omp", "host-sentinel"), "host-only\n")
-		stdout, stderr := harness.ssh(t, record, nil, `test -d /workspace/.omp && test ! -e /workspace/.omp/host-sentinel && printf 'reserved-mask-ok\n'`)
-		if string(stdout) != "reserved-mask-ok\n" || len(stderr) != 0 {
-			t.Fatalf("reserved mask stdout=%q stderr=%q", stdout, stderr)
-		}
+		record = harness.start(t, record)
+		assertReservedMask()
 		harness.remove(t, record)
 	})
 	t.Run("go-toolchain-with-omp-oauth", func(t *testing.T) {

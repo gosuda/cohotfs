@@ -144,6 +144,13 @@ func TestValidateReservedWorkspaceMasksRejectsSourceChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	duplicatePlan := plan
+	duplicatePlan.Mounts = append(append([]runtime.Mount(nil), plan.Mounts...), runtime.Mount{
+		Source: source, Target: "/workspace/.cohotfs", Type: "bind", Propagation: "rprivate",
+	})
+	if err := validateReservedWorkspaceMasks(duplicatePlan); err == nil || !strings.Contains(err.Error(), "duplicated mask target") {
+		t.Fatalf("duplicate reserved mask validation error = %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(source, ".cohotfs", "host-state"), []byte("updated"), 0o600); err != nil {
 		t.Fatal(err)
 	}

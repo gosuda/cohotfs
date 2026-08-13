@@ -189,13 +189,16 @@ func validateReservedWorkspaceMasks(plan Plan) error {
 		masked := false
 		target := filepath.Join(workspaceTarget, name)
 		for _, mounted := range plan.Mounts {
-			if mounted.Target == target {
-				masked = mounted.Type == "tmpfs" && mounted.Source == "" && mounted.ReadOnly
-				if !masked {
-					return fmt.Errorf("reserved workspace path %s has an invalid mask", name)
-				}
-				break
+			if mounted.Target != target {
+				continue
 			}
+			if masked {
+				return fmt.Errorf("reserved workspace path %s has a duplicated mask target", name)
+			}
+			if mounted.Type != "tmpfs" || mounted.Source != "" || !mounted.ReadOnly {
+				return fmt.Errorf("reserved workspace path %s has an invalid mask", name)
+			}
+			masked = true
 		}
 		expectedIdentity, hasIdentity := identities[name]
 		if masked != hasIdentity {

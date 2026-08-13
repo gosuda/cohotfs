@@ -255,13 +255,12 @@ enable only the integrations that project needs.
 OMP is opt-in. When enabled, its selected binary, native modules, model catalog,
 and non-secret configuration are cloned into workspace-owned writable snapshots;
 container writes cannot modify the host copies. Set `requireCow: true` to require
-reflink support instead of allowing a private copy-once fallback. Set
-`agents.omp.import.oauthDB: true` only when the workspace may receive credentials.
-Cohotfs directly byte-copies `agent.db` and any existing `-wal`, `-shm`, or
-`-journal` sidecars into a private, writable snapshot; these files do not use
-reflinks even when `requireCow: true`. Host and workspace credential updates do
-not sync. Stop OMP or otherwise quiesce its database before workspace creation
-when a point-in-time-consistent copy is required.
+reflink support instead of allowing a private copy-once fallback. Setting
+`agents.omp.import.oauthDB: true` clones the complete OMP agent directory,
+including its credential, session, history, configuration, and cache state, into
+a private writable COW snapshot mounted at `PI_CODING_AGENT_DIR`. Host and
+workspace changes do not sync. Stop OMP before workspace creation when a
+point-in-time-consistent SQLite snapshot is required.
 
 All host-side state stays under:
 

@@ -72,12 +72,12 @@ func (f *lifecycleBackend) Create(_ context.Context, spec runtime.WorkspaceSpec)
 	return f.ref, nil
 }
 func (f *lifecycleBackend) Start(_ context.Context, _ runtime.WorkspaceRef) error {
+	f.startCalls++
 	if f.onStart != nil {
 		if err := f.onStart(); err != nil {
 			return err
 		}
 	}
-	f.startCalls++
 	for _, declared := range f.created.Mounts {
 		if declared.Target != "/run/cohotfs/transport/ssh" {
 			continue
@@ -474,6 +474,31 @@ func TestStartStopsRuntimeWhenReservedPathChangesDuringStart(t *testing.T) {
 	assertPersistedWorkspaceError(t, service, record.ID)
 }
 
+func TestResumedRunningStartStopsRuntimeWhenInitialPinFails(t *testing.T) {
+	service, backend, record, reserved := newStoppedMaskedWorkspace(t)
+	record.Status = state.StatusStarting
+	if err := service.store.SaveWorkspace(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(reserved, reserved+".original"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(reserved, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	backend.status.Running = true
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	record, err := service.Start(ctx, record.ID, t.Name()+"/start")
+	if err == nil || !strings.Contains(err.Error(), "changed after plan compilation") {
+		t.Fatalf("resumed start error = %v", err)
+	}
+	if !backend.stopped || backend.stopContextErr != nil || backend.startCalls != 0 || record.Status != state.StatusError {
+		t.Fatalf("resumed start cleanup: stopped=%v stopCtx=%v startCalls=%d status=%s", backend.stopped, backend.stopContextErr, backend.startCalls, record.Status)
+	}
+	assertPersistedWorkspaceError(t, service, record.ID)
+}
+
 func TestStartErrorUsesFailureCleanup(t *testing.T) {
 	service, backend, record, reserved := newStoppedMaskedWorkspace(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -491,8 +516,8 @@ func TestStartErrorUsesFailureCleanup(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "injected start failure") || !strings.Contains(err.Error(), "changed after plan compilation") {
 		t.Fatalf("start error = %v", err)
 	}
-	if !backend.stopped || backend.stopContextErr != nil || backend.readyReads != 0 || record.Status != state.StatusError {
-		t.Fatalf("start failure cleanup: stopped=%v stopCtx=%v readyReads=%d status=%s", backend.stopped, backend.stopContextErr, backend.readyReads, record.Status)
+	if !backend.stopped || backend.stopContextErr != nil || backend.startCalls != 1 || backend.readyReads != 0 || record.Status != state.StatusError {
+		t.Fatalf("start failure cleanup: stopped=%v stopCtx=%v startCalls=%d readyReads=%d status=%s", backend.stopped, backend.stopContextErr, backend.startCalls, backend.readyReads, record.Status)
 	}
 	assertPersistedWorkspaceError(t, service, record.ID)
 }
