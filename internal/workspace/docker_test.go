@@ -287,6 +287,55 @@ func TestDockerServiceCreateStartStopRemove(t *testing.T) {
 	}
 }
 
+func TestCreateRuntimeRejectsReservedPathRemovedAfterPlanCompilation(t *testing.T) {
+	root, err := hostroot.OpenForTest(filepath.Join(t.TempDir(), "root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	store, err := state.NewStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := t.TempDir()
+	reserved := filepath.Join(source, ".omp")
+	if err := os.Mkdir(reserved, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	workspace := config.BuiltinWorkspace("api", "example.invalid/base:dev")
+	image := runtime.ResolvedImage{Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BootstrapAPI: containeragent.BootstrapAPI}
+	id, err := state.NewWorkspaceID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := CompilePlan(workspace, id, 1000, 1000, source, "manifest", image, "", testSSHSocket(t), availableDocker())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(reserved); err != nil {
+		t.Fatal(err)
+	}
+	record := state.Workspace{
+		ID: id, Name: plan.Name, OwnerUID: plan.OwnerUID, OwnerGID: plan.OwnerGID,
+		CanonicalSource: plan.CanonicalSource, ManifestDigest: plan.ManifestDigest, Backend: plan.Backend,
+		ImageDigest: plan.Image.Digest, BootstrapAPI: plan.Image.BootstrapAPI,
+		ContainerUID: plan.ContainerUID, ContainerGID: plan.ContainerGID,
+		Status: state.StatusCreating, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+	if err := store.SaveWorkspace(record); err != nil {
+		t.Fatal(err)
+	}
+	backend := &lifecycleBackend{}
+	service := NewDockerService(root, store, backend)
+	_, err = service.createRuntimeLocked(context.Background(), record, plan, runtime.Mount{})
+	if err == nil || !strings.Contains(err.Error(), "changed after plan compilation") {
+		t.Fatalf("create runtime error = %v", err)
+	}
+	if backend.createCalls != 0 {
+		t.Fatalf("runtime create called with stale reserved mask: %d", backend.createCalls)
+	}
+}
+
 func TestDockerServiceRemoveRecoversReadyWorkspaceWithMissingContainer(t *testing.T) {
 	root, err := hostroot.OpenForTest(filepath.Join(t.TempDir(), "root"))
 	if err != nil {

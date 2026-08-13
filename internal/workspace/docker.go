@@ -489,6 +489,9 @@ func activeMountResources(resources []state.ExternalResource) []state.ExternalRe
 }
 
 func (s *DockerService) createRuntimeLocked(ctx context.Context, record state.Workspace, plan Plan, bootstrapMount runtime.Mount) (state.Workspace, error) {
+	if err := validateReservedWorkspaceMasks(plan); err != nil {
+		return s.failCreate(record, activeMountResources(record.Resources), err)
+	}
 	runtimeSpec := plan.RuntimeSpec(bootstrapMount)
 	runtimeSpec.Record = func(ref runtime.WorkspaceRef) error {
 		record.RuntimeRef = ref
